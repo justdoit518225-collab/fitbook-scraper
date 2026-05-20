@@ -52,13 +52,24 @@ def load_config() -> dict[str, Any]:
         return json.load(f)
 
 
+def _normalize_cookie_header(raw: str) -> str:
+    """整理 Cookie 字串，避免 Secret 含換行或 'Cookie:' 前綴導致 requests InvalidHeader。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    s = s.replace("\r", "").replace("\n", "").strip()
+    if s.lower().startswith("cookie:"):
+        s = s.split(":", 1)[1].strip()
+    return s
+
+
 def effective_cookie(cfg: dict[str, Any]) -> str:
-    c = (cfg.get("cookie_header") or "").strip()
+    c = _normalize_cookie_header(cfg.get("cookie_header") or "")
     if c:
         return c
     env_name = (cfg.get("cookie_env") or "FITBOOK_COOKIE").strip()
     if env_name:
-        return (os.environ.get(env_name) or "").strip()
+        return _normalize_cookie_header(os.environ.get(env_name) or "")
     return ""
 
 
