@@ -69,6 +69,8 @@ git push -u origin main
 
 程式會讀環境變數 `FITBOOK_COOKIE`（`config.github.json` 已設 `cookie_env`）。
 
+**重要：** Secret 必須是**一整行**（不可換行）。若出現 `InvalidHeader`，請 Update Secret：刪掉所有換行，不要貼 `Cookie:` 字樣。
+
 ### 2. `GOOGLE_SERVICE_ACCOUNT_JSON`
 
 - **Name：** `GOOGLE_SERVICE_ACCOUNT_JSON`
