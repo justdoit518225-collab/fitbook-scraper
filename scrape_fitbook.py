@@ -22,6 +22,7 @@ from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from PIL import Image as PILImage
 
@@ -50,6 +51,14 @@ OUTPUT_COLUMNS = [
 def load_config() -> dict[str, Any]:
     with CONFIG_PATH.open(encoding="utf-8") as f:
         return json.load(f)
+
+
+def _scan_timezone(cfg: dict[str, Any]) -> ZoneInfo:
+    name = (cfg.get("timezone") or "Asia/Taipei").strip()
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return ZoneInfo("Asia/Taipei")
 
 
 def _normalize_cookie_header(raw: str) -> str:
@@ -413,8 +422,10 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
 
     rows: list[dict[str, Any]] = []
     avatar_urls: list[str | None] = []
-    scan_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    today = date.today()
+    tz = _scan_timezone(cfg)
+    now_local = datetime.now(tz)
+    scan_at = now_local.strftime("%Y-%m-%d %H:%M:%S")
+    today = now_local.date()
 
     for t in templates:
         name = t.get("name") or ""

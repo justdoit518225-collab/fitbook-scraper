@@ -8,6 +8,7 @@
   "google_service_account_json": "google_service_account.json",
   "cookie_header": "",
   "cookie_env": "FITBOOK_COOKIE",
+  "timezone": "Asia/Taipei",
   "venues": [
     { "label": "中和自強國小", "match": ["自強國小", "中和自強"] },
     { "label": "永和秀朗國小", "match": ["秀朗國小", "永和秀朗", "永朗國小"] },
