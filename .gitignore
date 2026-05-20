@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+_fitbook_*.html
+_probe_*.py
+last_scan_state.json
+google_service_account.json
+*-service-account*.json
+.env
+config.json

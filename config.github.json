@@ -1,0 +1,21 @@
+{
+  "base_url": "https://www.fit-book.com.tw",
+  "store_path": "urlname459",
+  "place_id": 564,
+  "home_path": "/urlname459/564",
+  "output_excel": "fitbook_ball_sessions.xlsx",
+  "google_sheet_id": "1YthX3ONG_FymUPnpZXkJBbxFmkzdDBPLm3pC5Uh6XWw",
+  "google_service_account_json": "google_service_account.json",
+  "cookie_header": "",
+  "cookie_env": "FITBOOK_COOKIE",
+  "venues": [
+    { "label": "中和自強國小", "match": ["自強國小", "中和自強"] },
+    { "label": "永和秀朗國小", "match": ["秀朗國小", "永和秀朗", "永朗國小"] },
+    { "label": "板橋中山國小", "match": ["中山國小", "板橋中山"] },
+    { "label": "中和六方羽", "match": ["六方羽"] }
+  ],
+  "only_ball_you_name_contains": "球敘",
+  "match_all_templates": true,
+  "include_zero_reservation_sessions": false,
+  "merge_session_cells": true
+}

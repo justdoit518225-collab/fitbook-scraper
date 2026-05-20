@@ -1,0 +1,843 @@
+# -*- coding: utf-8 -*-
+"""
+FitBook：指定「球敘」場館之場次；僅寫入「已報名人數 > 0」者。
+
+會員：須登入 Cookie（cookie_header 或 FITBOOK_COOKIE），自課程頁解析「已預約會員」
+之暱稱與頭像網址；每位會員一列，頭像可為 Excel 內嵌圖或 Google 試算表 =IMAGE(url)。
+
+異動歷史：以「預約頁面」為場次、會員暱稱人次（含重複）與上次 last_scan_state.json 比對；
+若有任一场次增減人員或場次增減，將當次完整資料列附加至「掃描歷史」（首次執行僅建立基準不附加）。
+
+輸出：若 config 設定 google_sheet_id 且服務帳戶 JSON 存在，寫入 Google 試算表；否則寫本機 Excel。
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+import tempfile
+from collections import Counter
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+from PIL import Image as PILImage
+
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+
+CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
+LAST_SCAN_STATE_PATH = Path(__file__).resolve().parent / "last_scan_state.json"
+HISTORY_SHEET_NAME = "掃描歷史"
+OUTPUT_COLUMNS = [
+    "掃描時間",
+    "場館標籤",
+    "場次日期",
+    "星期",
+    "時段",
+    "已報名人數",
+    "開放名額",
+    "剩餘名額",
+    "會員暱稱",
+    "頭像",
+    "預約頁面",
+]
+
+
+def load_config() -> dict[str, Any]:
+    with CONFIG_PATH.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def effective_cookie(cfg: dict[str, Any]) -> str:
+    c = (cfg.get("cookie_header") or "").strip()
+    if c:
+        return c
+    env_name = (cfg.get("cookie_env") or "FITBOOK_COOKIE").strip()
+    if env_name:
+        return (os.environ.get(env_name) or "").strip()
+    return ""
+
+
+def extract_json_after(html: str, needle: str) -> Any:
+    i = html.find(needle)
+    if i < 0:
+        raise ValueError(f"找不到標記: {needle!r}")
+    i += len(needle)
+    while i < len(html) and html[i].isspace():
+        i += 1
+    if i >= len(html) or html[i] != "[":
+        raise ValueError("預期為 JSON 陣列")
+    depth = 0
+    start = i
+    for j in range(i, len(html)):
+        ch = html[j]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return json.loads(html[start : j + 1])
+    raise ValueError("JSON 陣列未閉合")
+
+
+def fetch_home_html(cfg: dict[str, Any], session: requests.Session) -> str:
+    url = f"{cfg['base_url']}{cfg['home_path']}"
+    r = session.get(url, timeout=60)
+    r.raise_for_status()
+    r.encoding = r.apparent_encoding or "utf-8"
+    return r.text
+
+
+def parse_course_templates(html: str) -> list[dict[str, Any]]:
+    return extract_json_after(html, "let courseTemplates = ")
+
+
+def template_matches_venue(
+    name: str,
+    venues: list[dict[str, Any]],
+    ball_you_keyword: str,
+) -> tuple[bool, str | None]:
+    if ball_you_keyword and ball_you_keyword not in name:
+        return False, None
+    for v in venues:
+        for m in v["match"]:
+            if m in name:
+                return True, v["label"]
+    return False, None
+
+
+def fetch_template_courses(
+    cfg: dict[str, Any],
+    session: requests.Session,
+    template_id: int,
+) -> dict[str, Any]:
+    url = (
+        f"{cfg['base_url']}/{cfg['store_path']}/course_template/"
+        f"{cfg['place_id']}?id={template_id}"
+    )
+    r = session.get(url, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+
+def _is_login_wall(html: str) -> bool:
+    if "註冊登入" in html and "使用LINE帳號登入" in html:
+        return True
+    t = re.search(r"<title>([^<]+)</title>", html, re.I)
+    if t and "註冊登入" in t.group(1):
+        return True
+    return False
+
+
+def _looks_like_person_name(s: str) -> bool:
+    s = s.strip()
+    if not s or len(s) < 2 or len(s) > 24:
+        return False
+    if re.fullmatch(r"[\u4e00-\u9fff\u00b7\u2022\u30fb·\sA-Za-z0-9]+", s):
+        return True
+    return False
+
+
+def _normalize_img_url(src: str | None) -> str | None:
+    if not src or not str(src).strip():
+        return None
+    u = str(src).strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    if u.startswith("http"):
+        return u
+    return None
+
+
+def _parse_fitbook_yiyu_huiyuan(soup: BeautifulSoup) -> list[tuple[str, str | None]]:
+    """FitBook〈已預約會員〉：(暱稱, 頭像 URL)，順序與網頁一致，允許暱稱重複。"""
+    out: list[tuple[str, str | None]] = []
+    for h2 in soup.find_all("h2"):
+        if "已預約會員" not in h2.get_text():
+            continue
+        container = h2.find_next_sibling("div")
+        if not container:
+            continue
+        for block in container.select("div.d-inline-block.w-4em"):
+            img = block.find("img", alt=True)
+            ptag = block.find("p", class_=lambda c: bool(c) and "truncate" in c)
+            alt = (img.get("alt") or "").strip() if img else ""
+            ptxt = ptag.get_text(strip=True) if ptag else ""
+            url = _normalize_img_url(img.get("src") if img else None)
+            if ptxt:
+                chosen = ptxt
+            else:
+                chosen = alt
+            if chosen:
+                out.append((chosen, url))
+    return out
+
+
+def parse_members_with_avatars_from_html(
+    html: str, teacher_name: str | None, extra_selectors: list[str] | None
+) -> list[tuple[str, str | None]]:
+    """從課程頁擷取會員暱稱與頭像網址（無圖則為 None）。"""
+    if _is_login_wall(html):
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    fb = _parse_fitbook_yiyu_huiyuan(soup)
+    if fb:
+        if teacher_name:
+            tn = teacher_name.strip()
+            fb = [(n, u) for n, u in fb if n != tn]
+        return fb
+
+    names: list[str] = []
+    for sel in extra_selectors or []:
+        try:
+            for el in soup.select(sel):
+                t = el.get_text(strip=True)
+                if _looks_like_person_name(t) and t not in names:
+                    names.append(t)
+        except Exception:
+            continue
+
+    for tr in soup.select("table tbody tr"):
+        tds = tr.find_all("td")
+        if not tds:
+            continue
+        for td in tds[:2]:
+            t = td.get_text(strip=True)
+            if _looks_like_person_name(t):
+                if teacher_name and t == teacher_name.strip():
+                    continue
+                if t not in names:
+                    names.append(t)
+            break
+
+    for script in soup.find_all("script"):
+        txt = script.string
+        if not txt or len(txt) < 20:
+            continue
+        for m in re.finditer(
+            r'"(?:member_name|memberName|nickname|reserve_name|member_nickname)"\s*:\s*"([^"\\]+)"',
+            txt,
+        ):
+            val = m.group(1).strip()
+            if _looks_like_person_name(val) and val not in names:
+                names.append(val)
+
+    for tag in soup.find_all(True, attrs={"data-member-name": True}):
+        val = tag.get("data-member-name", "").strip()
+        if _looks_like_person_name(val) and val not in names:
+            names.append(val)
+
+    if teacher_name:
+        tn = teacher_name.strip()
+        names = [n for n in names if n != tn]
+
+    seen: set[str] = set()
+    out_n: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out_n.append(n)
+    return [(n, None) for n in out_n]
+
+
+def fetch_member_course_html(
+    cfg: dict[str, Any],
+    session: requests.Session,
+    course_id: int,
+    place_id: int,
+) -> str:
+    url = f"{cfg['base_url']}/{cfg['store_path']}/member/course/{course_id}/{place_id}"
+    r = session.get(url, timeout=60)
+    r.raise_for_status()
+    r.encoding = r.apparent_encoding or "utf-8"
+    return r.text
+
+
+def session_members_snapshot(df: pd.DataFrame) -> dict[str, list[str]]:
+    """以預約頁面 URL 為場次鍵，值為該場會員暱稱列表（順序與列相同，含重複）。"""
+    if df.empty or "預約頁面" not in df.columns or "會員暱稱" not in df.columns:
+        return {}
+    out: dict[str, list[str]] = {}
+    for url, grp in df.groupby("預約頁面", sort=False):
+        out[str(url)] = list(grp["會員暱稱"].astype(str))
+    return out
+
+
+def load_last_scan_state() -> dict[str, list[str]]:
+    if not LAST_SCAN_STATE_PATH.is_file():
+        return {}
+    try:
+        raw = json.loads(LAST_SCAN_STATE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): list(v) for k, v in raw.items() if isinstance(v, list)}
+    except (json.JSONDecodeError, OSError, TypeError):
+        return {}
+
+
+def save_last_scan_state(snap: dict[str, list[str]]) -> None:
+    LAST_SCAN_STATE_PATH.write_text(
+        json.dumps(snap, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def snapshot_has_member_change(
+    previous: dict[str, list[str]], current: dict[str, list[str]]
+) -> bool:
+    """任一场次暱稱人次（Counter）不同、場次新增或消失，皆視為有異動。"""
+    keys = set(previous) | set(current)
+    for k in keys:
+        if Counter(previous.get(k, [])) != Counter(current.get(k, [])):
+            return True
+    return False
+
+
+def load_history_dataframe(
+    out_path: Path, columns: list[str], cfg: dict[str, Any]
+) -> pd.DataFrame:
+    from google_sheets_export import google_sheets_enabled, load_history_from_gsheet
+
+    if google_sheets_enabled(cfg):
+        return load_history_from_gsheet(cfg, columns)
+    if not out_path.is_file():
+        return pd.DataFrame(columns=columns)
+    try:
+        hist = pd.read_excel(out_path, sheet_name=HISTORY_SHEET_NAME)
+    except (ValueError, OSError):
+        return pd.DataFrame(columns=columns)
+    return hist.reindex(columns=columns)
+
+
+def _parse_session_date_val(val: Any) -> date | None:
+    """從 API 的 date_val 轉成日期；無法解析則回傳 None。"""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    m = re.match(
+        r"^(\d{4})[./\-年](\d{1,2})[./\-月](\d{1,2})(?:日)?",
+        s,
+    )
+    if m:
+        y, mo, d_ = int(m[1]), int(m[2]), int(m[3])
+        return date(y, mo, d_)
+    ts = pd.to_datetime(s, errors="coerce", utc=False)
+    if pd.isna(ts):
+        return None
+    pdt = ts.to_pydatetime()
+    return pdt.date()
+
+
+def _coerce_nonneg_int(x: Any) -> int:
+    if x is None or (isinstance(x, (float,)) and pd.isna(x)):
+        return 0
+    if isinstance(x, (int, float)) and not isinstance(x, bool):
+        try:
+            v = int(x)
+        except (ValueError, OSError, OverflowError):
+            return 0
+        return v if v >= 0 else 0
+    s = str(x).strip()
+    if not s or s.lower() in ("nan", "none", "nat"):
+        return 0
+    try:
+        v = int(float(s))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return v if v >= 0 else 0
+
+
+def _as_text_cell(x: Any) -> str:
+    if x is None or (isinstance(x, (float,)) and pd.isna(x)):
+        return ""
+    return str(x).strip()
+
+
+def _sort_dataframe_by_session_date(df: pd.DataFrame) -> pd.DataFrame:
+    """以場次日期遞增排序（越近的日期越上）；同場次、無法解析日期者接在最後。
+    次要排序：預約頁面、場館、時段、會員，使同一活動的列維持相鄰。
+    """
+    if df.empty or "場次日期" not in df.columns:
+        return df
+    out = df.copy()
+    out["_dt"] = pd.to_datetime(out["場次日期"], errors="coerce")
+    sub = ("預約頁面", "場館標籤", "時段", "會員暱稱")
+    by = ["_dt"] + [c for c in sub if c in out.columns]
+    out = out.sort_values(by=by, na_position="last").reset_index(drop=True)
+    return out.drop(columns=["_dt"])
+
+
+def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
+    cfg = load_config()
+    venues = cfg["venues"]
+    ball_kw = cfg.get("only_ball_you_name_contains") or ""
+    match_all_templates = bool(cfg.get("match_all_templates"))
+    include_zero_reservation = bool(cfg.get("include_zero_reservation_sessions"))
+    cookie = effective_cookie(cfg)
+    extra_selectors = cfg.get("member_name_css_selectors") or []
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "zh-TW,zh;q=0.9",
+        }
+    )
+    if cookie:
+        session.headers["Cookie"] = cookie
+
+    html = fetch_home_html(cfg, session)
+    templates = parse_course_templates(html)
+
+    rows: list[dict[str, Any]] = []
+    avatar_urls: list[str | None] = []
+    scan_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    today = date.today()
+
+    for t in templates:
+        name = t.get("name") or ""
+        ok, venue_label = template_matches_venue(name, venues, ball_kw)
+        if not ok and not match_all_templates:
+            continue
+        if not venue_label:
+            venue_label = name.strip() or "未分類"
+
+        tid = int(t["id"])
+        data = fetch_template_courses(cfg, session, tid)
+
+        for c in data.get("courses") or []:
+            rc = c.get("reservation_count")
+            try:
+                rc_int = int(rc) if rc is not None else 0
+            except (TypeError, ValueError):
+                rc_int = 0
+            if rc_int <= 0 and not include_zero_reservation:
+                continue
+            sdate = _parse_session_date_val(c.get("date_val"))
+            if sdate is not None and sdate < today:
+                continue
+
+            teacher_name = c.get("teacher_name") or ""
+            members: list[tuple[str, str | None]] = []
+            name_note = ""
+
+            if rc_int > 0 and cookie:
+                try:
+                    page_html = fetch_member_course_html(
+                        cfg, session, int(c["id"]), int(cfg["place_id"])
+                    )
+                    members = parse_members_with_avatars_from_html(
+                        page_html, teacher_name, extra_selectors
+                    )
+                except requests.RequestException:
+                    name_note = "（課程頁請求失敗）"
+                if not members and not name_note:
+                    name_note = "（已帶 Cookie 但未解析到姓名，可能須調整 member_name_css_selectors）"
+            elif rc_int > 0:
+                name_note = "（請在 config.json 設定 cookie_header 或環境變數 FITBOOK_COOKIE）"
+
+            base_row = {
+                "掃描時間": scan_at,
+                "場館標籤": venue_label or "",
+                "場次日期": _as_text_cell(c.get("date_val")) or _as_text_cell(
+                    c.get("date")
+                ),
+                "星期": _as_text_cell(c.get("day_of_week_val"))
+                or _as_text_cell(c.get("day_of_week")),
+                "時段": _as_text_cell(c.get("show_time")) or _as_text_cell(
+                    c.get("time")
+                ),
+                "已報名人數": int(rc_int),
+                "開放名額": _coerce_nonneg_int(c.get("order_count")),
+                "剩餘名額": _coerce_nonneg_int(c.get("remain_count")),
+                "預約頁面": (c.get("url") or "").strip(),
+            }
+
+            if members:
+                for mname, murl in members:
+                    r = dict(base_row)
+                    r["會員暱稱"] = mname
+                    r["頭像"] = ""
+                    rows.append(r)
+                    avatar_urls.append(murl)
+            else:
+                r = dict(base_row)
+                r["會員暱稱"] = name_note
+                r["頭像"] = ""
+                rows.append(r)
+                avatar_urls.append(None)
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df[[c for c in OUTPUT_COLUMNS if c in df.columns]]
+        n = len(df)
+        if len(avatar_urls) == n and n:
+            tmp_col = "__avatar_order__"
+            df[tmp_col] = avatar_urls
+            df = _sort_dataframe_by_session_date(df)
+            ser = df.pop(tmp_col)
+            avatar_urls = ser.tolist()
+        else:
+            df = _sort_dataframe_by_session_date(df)
+    return df, avatar_urls, session
+
+
+def _excel_display_width(s: str) -> float:
+    """估算儲存格文字在欄寬上的可見長度（中英混排：全形字元約 2、ASCII 約 1）。"""
+    w = 0.0
+    for ch in str(s):
+        if "\u4e00" <= ch <= "\u9fff" or ord(ch) > 0x2E7F:
+            w += 2.1
+        else:
+            w += 1.05
+    return max(w, 1.0)
+
+
+SESSION_MERGE_COLUMNS = [
+    "掃描時間",
+    "場館標籤",
+    "場次日期",
+    "星期",
+    "時段",
+    "已報名人數",
+    "開放名額",
+    "剩餘名額",
+    "預約頁面",
+]
+
+
+def _emptyish_for_merge(x: Any) -> bool:
+    if x is None or (isinstance(x, (float,)) and pd.isna(x)):
+        return True
+    if x == "" or (isinstance(x, str) and not str(x).strip()):
+        return True
+    s = str(x).strip()
+    if s in ("", "None", "nan", "NaT"):
+        return True
+    return False
+
+
+def _cell_equal_for_merge(a: Any, b: Any) -> bool:
+    if _emptyish_for_merge(a) and _emptyish_for_merge(b):
+        return True
+    if _emptyish_for_merge(a) and not _emptyish_for_merge(b):
+        try:
+            if float(b) == 0.0:
+                return True
+        except (TypeError, ValueError, OverflowError):
+            pass
+        return False
+    if _emptyish_for_merge(b) and not _emptyish_for_merge(a):
+        try:
+            if float(a) == 0.0:
+                return True
+        except (TypeError, ValueError, OverflowError):
+            pass
+        return False
+    if a == b:
+        return True
+    try:
+        if float(a) == float(b):
+            return True
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return str(a).strip() == str(b).strip()
+
+
+def _merge_text_norm(x: Any) -> str:
+    s = ("" if _emptyish_for_merge(x) else str(x)).replace("～", "~").replace("–", "-")
+    s = re.sub(r"\s+", " ", s.strip())
+    return s
+
+
+def _merge_booking_key(x: Any) -> str:
+    s = ("" if _emptyish_for_merge(x) else str(x)).strip()
+    s = s.split("#", 1)[0].split("?", 1)[0]
+    m = re.search(r"/course/(\d+)/(\d+)", s)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return s
+
+
+def _merge_date_equal(a: Any, b: Any) -> bool:
+    if _emptyish_for_merge(a) and _emptyish_for_merge(b):
+        return True
+    d1 = pd.to_datetime(a, errors="coerce")
+    d2 = pd.to_datetime(b, errors="coerce")
+    if not pd.isna(d1) and not pd.isna(d2) and d1.normalize() == d2.normalize():
+        return True
+    return _merge_text_norm(a) == _merge_text_norm(b)
+
+
+def _merge_field_equal(col: str, a: Any, b: Any) -> bool:
+    if col == "預約頁面":
+        ka, kb = _merge_booking_key(a), _merge_booking_key(b)
+        if ka and kb and ka == kb:
+            return True
+        return _emptyish_for_merge(a) and _emptyish_for_merge(b)
+    if col == "場次日期":
+        return _merge_date_equal(a, b)
+    if col in ("掃描時間", "場館標籤", "星期", "時段"):
+        if _cell_equal_for_merge(a, b):
+            return True
+        return _merge_text_norm(a) == _merge_text_norm(b)
+    return _cell_equal_for_merge(a, b)
+
+
+def _rows_same_session_block(df: pd.DataFrame, i: int, j: int) -> bool:
+    for c in SESSION_MERGE_COLUMNS:
+        if c not in df.columns:
+            return False
+        if not _merge_field_equal(c, df.iloc[i][c], df.iloc[j][c]):
+            return False
+    return True
+
+
+def _merge_session_info_cells(ws: Any, df: pd.DataFrame) -> None:
+    """連續多列若 A～H 與預約頁面均相同，則垂直合併該等欄（不併 會員／頭像 欄）。"""
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.styles import Alignment
+    from openpyxl.utils import get_column_letter
+
+    if df.empty or len(df) < 2:
+        return
+    if not all(c in df.columns for c in SESSION_MERGE_COLUMNS):
+        return
+
+    col_letters = {
+        c: get_column_letter(list(df.columns).index(c) + 1) for c in SESSION_MERGE_COLUMNS
+    }
+
+    i = 0
+    n = len(df)
+    while i < n:
+        j = i + 1
+        while j < n and _rows_same_session_block(df, i, j):
+            j += 1
+        if j > i + 1:
+            start_excel = i + 2
+            end_excel = j + 1
+            for c in SESSION_MERGE_COLUMNS:
+                letter = col_letters[c]
+                mrange = f"{letter}{start_excel}:{letter}{end_excel}"
+                try:
+                    ws.merge_cells(mrange)
+                except (ValueError, OSError, TypeError, KeyError):
+                    continue
+                for r in range(start_excel + 1, end_excel + 1):
+                    cell = ws[f"{letter}{r}"]
+                    if not isinstance(cell, MergedCell):
+                        cell.value = None
+                top = ws[f"{letter}{start_excel}"]
+                if not isinstance(top, MergedCell):
+                    top.alignment = Alignment(
+                        horizontal="left", vertical="center", wrap_text=True
+                    )
+        i = j
+
+
+def _autofit_worksheet_columns(ws: Any, df: pd.DataFrame) -> None:
+    from openpyxl.utils import get_column_letter
+
+    for i, col in enumerate(df.columns, start=1):
+        letter = get_column_letter(i)
+        label = str(col)
+        max_w = _excel_display_width(label)
+
+        if len(df) == 0:
+            ws.column_dimensions[letter].width = min(max(max_w * 1.08 + 2.0, 14.0), 70.0)
+            continue
+
+        col_key = label
+        for v in df[col].astype(str):
+            if col_key == "預約頁面":
+                sample = v if len(v) <= 90 else v[:90]
+                max_w = max(max_w, _excel_display_width(sample))
+            else:
+                max_w = max(max_w, _excel_display_width(v))
+
+        if col_key == "預約頁面":
+            width = min(max(max_w * 1.05 + 2.5, 18.0), 58.0)
+        elif col_key == "會員暱稱":
+            width = min(max(max_w * 1.05 + 2.5, 18.0), 72.0)
+        elif col_key == "頭像":
+            width = 12.0
+        else:
+            width = min(max(max_w * 1.08 + 2.5, 14.0), 48.0)
+
+        ws.column_dimensions[letter].width = width
+
+
+def _download_avatar_image(session: requests.Session, url: str) -> bytes | None:
+    try:
+        r = session.get(
+            url,
+            timeout=30,
+            headers={"Referer": "https://www.fit-book.com.tw/"},
+        )
+        r.raise_for_status()
+        if len(r.content) > 2_500_000:
+            return None
+        return r.content
+    except requests.RequestException:
+        return None
+
+
+def _embed_avatars(
+    ws: Any,
+    df: pd.DataFrame,
+    avatar_urls: list[str | None],
+    session: requests.Session,
+    max_side_px: int,
+) -> None:
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.utils import get_column_letter
+
+    if "頭像" not in df.columns or len(avatar_urls) != len(df):
+        return
+
+    col_idx = list(df.columns).index("頭像") + 1
+    letter = get_column_letter(col_idx)
+
+    for i, url in enumerate(avatar_urls):
+        if not url:
+            continue
+        raw = _download_avatar_image(session, url)
+        if not raw:
+            continue
+        try:
+            pil = PILImage.open(io.BytesIO(raw))
+            pil = pil.convert("RGBA")
+            pil.thumbnail((max_side_px, max_side_px), PILImage.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            pil.save(buf, format="PNG")
+            buf.seek(0)
+            tmp_path: str | None = None
+            try:
+                xlimg = XLImage(buf)
+            except Exception:
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    pil.save(tmp, format="PNG")
+                    tmp_path = tmp.name
+                xlimg = XLImage(tmp_path)
+
+            row_excel = i + 2
+            xlimg.width = pil.width
+            xlimg.height = pil.height
+            ws.add_image(xlimg, f"{letter}{row_excel}")
+            ws.row_dimensions[row_excel].height = max(
+                ws.row_dimensions[row_excel].height or 15,
+                min(pil.height * 0.78, 120),
+            )
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        except OSError:
+            continue
+
+
+def _apply_font_microsoft_jhenghei_and_header_fill(ws: Any, df: pd.DataFrame) -> None:
+    """全表微軟正黑體；第一列標題加底色、粗體。"""
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.styles import Font, PatternFill
+
+    body_font = Font(name="Microsoft JhengHei", size=11)
+    header_font = Font(name="Microsoft JhengHei", size=11, bold=True)
+    header_fill = PatternFill(
+        start_color="D9E1F2",
+        end_color="D9E1F2",
+        fill_type="solid",
+    )
+
+    max_r = max(1, ws.max_row or 1)
+    max_c = max(1, ws.max_column or len(df.columns))
+
+    for row in ws.iter_rows(min_row=1, max_row=max_r, min_col=1, max_col=max_c):
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            if cell.row == 1:
+                cell.font = header_font
+                cell.fill = header_fill
+            else:
+                cell.font = body_font
+
+
+def write_excel(
+    df: pd.DataFrame,
+    cfg: dict[str, Any],
+    avatar_urls: list[str | None],
+    session: requests.Session,
+    history_df: pd.DataFrame,
+) -> Path:
+    out = Path(__file__).resolve().parent / cfg["output_excel"]
+    max_px = int(cfg.get("avatar_max_px") or 52)
+
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="sessions", index=False)
+        sheet = writer.sheets["sessions"]
+        _autofit_worksheet_columns(sheet, df)
+        if cfg.get("merge_session_cells", True):
+            _merge_session_info_cells(sheet, df)
+        _embed_avatars(sheet, df, avatar_urls, session, max_px)
+        _apply_font_microsoft_jhenghei_and_header_fill(sheet, df)
+
+        history_df.to_excel(writer, sheet_name=HISTORY_SHEET_NAME, index=False)
+        hs = writer.sheets[HISTORY_SHEET_NAME]
+        _autofit_worksheet_columns(hs, history_df)
+        _apply_font_microsoft_jhenghei_and_header_fill(hs, history_df)
+    return out
+
+
+def main() -> None:
+    from google_sheets_export import google_sheets_enabled, write_google_sheets
+
+    cfg = load_config()
+    out = Path(__file__).resolve().parent / cfg["output_excel"]
+    df, avatar_urls, session = run_once()
+
+    cols = list(df.columns) if not df.empty else list(OUTPUT_COLUMNS)
+    snap = session_members_snapshot(df)
+    had_previous = LAST_SCAN_STATE_PATH.is_file()
+    previous = load_last_scan_state() if had_previous else {}
+
+    history_df = load_history_dataframe(out, cols, cfg)
+    appended = 0
+    if had_previous and snapshot_has_member_change(previous, snap):
+        chunk = df.reindex(columns=cols)
+        history_df = pd.concat([history_df, chunk], ignore_index=True)
+        appended = len(chunk)
+
+    if google_sheets_enabled(cfg):
+        url = write_google_sheets(df, history_df, avatar_urls, cfg)
+        path_msg = url
+    else:
+        path_msg = str(write_excel(df, cfg, avatar_urls, session, history_df))
+
+    save_last_scan_state(snap)
+
+    msg = f"寫入: {path_msg}，目前筆數: {len(df)}"
+    if appended:
+        msg += f"；因人員異動已附加至「{HISTORY_SHEET_NAME}」: {appended} 列"
+    elif had_previous:
+        msg += f"；與上次比對無場次人員異動，未追加歷史"
+    else:
+        msg += f"；首次建立比對基準，未追加歷史"
+    print(msg)
+
+
+if __name__ == "__main__":
+    main()
