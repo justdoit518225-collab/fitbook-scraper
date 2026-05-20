@@ -45,34 +45,17 @@ jobs:
       - name: Prepare config and service account
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GOOGLE_SERVICE_ACCOUNT_JSON:-}" ]; then
-            echo "Missing secret: GOOGLE_SERVICE_ACCOUNT_JSON"
-            exit 1
-          fi
-          cp config.github.json config.json
-          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_JSON" > google_service_account.json
-          python -c "import json; json.load(open('google_service_account.json'))"
+        run: python deploy/github_actions/prepare_ci.py
 
       - name: Run scraper
+        id: scrape
         env:
           FITBOOK_COOKIE: ${{ secrets.FITBOOK_COOKIE }}
         run: python scrape_fitbook.py
 
-      # 爬蟲失敗時可能沒產生檔案；cache/save 需要路徑存在，否則會 Cache save failed
-      - name: Ensure last scan state file exists
-        if: always()
-        run: |
-          if [ ! -f last_scan_state.json ]; then
-            echo '{}' > last_scan_state.json
-            echo "Created placeholder last_scan_state.json for cache"
-          fi
-
       - name: Save last scan state
         uses: actions/cache/save@v5
-        if: always()
-        continue-on-error: true
+        if: steps.scrape.outcome == 'success' && hashFiles('last_scan_state.json') != ''
         with:
           path: last_scan_state.json
-          key: ${{ steps.restore-state.outputs.cache-primary-key }}
+          key: fitbook-last-scan-v1

@@ -74,6 +74,15 @@ git push -u origin main
 - **Name：** `GOOGLE_SERVICE_ACCOUNT_JSON`
 - **Value：** 打開本機 `google_service_account.json`，**整份 JSON 全文複製貼上**（從 `{` 到 `}`）
 
+**常見錯誤（會出現 `JSONDecodeError: Extra data`）：**
+
+- 只貼了 `client_email` 一行，不是整份 JSON  
+- 在 Secret 外層又包了一層 `"` 引號  
+- 貼了兩份 JSON 接在一起  
+- 結尾多了說明文字  
+
+正確做法：用記事本打開 `google_service_account.json` → 全選 → 複製 → 貼到 Secret 的 Value（可多行，沒關係）
+
 ---
 
 ## 第四步：確認試算表設定
