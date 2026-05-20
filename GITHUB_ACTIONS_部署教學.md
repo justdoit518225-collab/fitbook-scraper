@@ -124,6 +124,67 @@ git push -u origin main
 
 ---
 
+## iPhone 主畫面一鍵「跑爬蟲」（捷徑 App）
+
+GitHub App **無法**把 Run workflow 放在首頁；可用 iPhone 內建 **「捷徑」** 呼叫 GitHub API，效果等同按 Run workflow。
+
+### A. 先建立 GitHub Token（只做一次）
+
+1. 用 Safari 開：https://github.com/settings/tokens  
+2. **Generate new token** → 建議選 **Fine-grained token**  
+3. 設定：
+   - Repository access：**Only select** → 選 `fitbook-scraper`
+   - Permissions → **Actions**：Read and write  
+   - **Metadata**：Read（通常會自動勾）
+4. 產生後**複製 token**（只顯示一次，請存到密碼管理器）
+
+（也可用 Classic token，勾選 `repo` 權限。）
+
+### B. 建立捷徑
+
+1. 打開 iPhone **「捷徑」** App → 右下角 **＋**  
+2. 新增動作 **「文字」**，內容貼上（把 `你的TOKEN` 換成剛才的 token）：
+
+```text
+你的TOKEN
+```
+
+3. 再新增 **「取得 URL 內容」**，設定：
+
+| 項目 | 值 |
+|------|-----|
+| URL | `https://api.github.com/repos/justdoit518225-collab/fitbook-scraper/actions/workflows/scrape-fitbook.yml/dispatches` |
+| 方法 | **POST** |
+| 標頭 | 見下方 |
+| 要求內文 | **JSON**，內容 `{"ref":"main"}` |
+
+**標頭（在「取得 URL 內容」裡新增標頭）：**
+
+| 鍵 | 值 |
+|----|-----|
+| Accept | `application/vnd.github+json` |
+| Authorization | `Bearer` + 空格 + 上一步「文字」的變數（點選「神奇變數」選該文字） |
+| Content-Type | `application/json` |
+| X-GitHub-Api-Version | `2022-11-28` |
+
+4. 建議再加 **「顯示通知」**：標題「FitBook」，內文「已送出爬蟲，約 1～3 分鐘後看試算表」  
+5. 捷徑命名例如：**FitBook 更新**  
+6. 點捷徑名稱旁 **ⓘ** → **加入主畫面**（可自訂圖示）
+
+### C. 使用方式
+
+- 主畫面點 **FitBook 更新** → 等通知  
+- 打開 **GitHub App** → 倉庫 **Actions** 可看到新的 run 在跑  
+- 完成後刷新 Google 試算表 `sessions`
+
+### 注意
+
+- Token 外洩等於別人能代你跑 workflow，勿分享、勿截圖  
+- 此捷徑只負責「觸發」；Cookie 過期仍要到 GitHub **Secrets** 更新  
+- 與每小時自動排程可並存，勿在短時間內狂按多次
+
+---
+
 ## 更新 Cookie（常見維護）
 
 1. 本機瀏覽器重新登入 FitBook，複製新 Cookie  
