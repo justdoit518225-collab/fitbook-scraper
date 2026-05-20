@@ -34,6 +34,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore last scan state
+        id: restore-state
         uses: actions/cache/restore@v5
         with:
           path: last_scan_state.json
@@ -59,9 +60,19 @@ jobs:
           FITBOOK_COOKIE: ${{ secrets.FITBOOK_COOKIE }}
         run: python scrape_fitbook.py
 
+      # 爬蟲失敗時可能沒產生檔案；cache/save 需要路徑存在，否則會 Cache save failed
+      - name: Ensure last scan state file exists
+        if: always()
+        run: |
+          if [ ! -f last_scan_state.json ]; then
+            echo '{}' > last_scan_state.json
+            echo "Created placeholder last_scan_state.json for cache"
+          fi
+
       - name: Save last scan state
         uses: actions/cache/save@v5
         if: always()
+        continue-on-error: true
         with:
           path: last_scan_state.json
-          key: fitbook-last-scan-v1
+          key: ${{ steps.restore-state.outputs.cache-primary-key }}
