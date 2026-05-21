@@ -7,6 +7,7 @@ FitBook：指定「球敘」場館之場次；僅寫入「已報名人數 > 0」
 
 異動歷史：以「預約頁面」為場次、會員暱稱人次（含重複）與上次 last_scan_state.json 比對；
 若有異動，僅將「新增／刪除」列插入「掃描歷史」頂端（首次執行僅建立基準不附加）。
+比對僅含「場次日期 >= 今天」的場次，已過期活動不會誤判刪除。
 已寫入歷史的「掃描時間」不會再改；無異動時不碰掃描歷史分頁（含欄寬）。
 
 輸出：若 config 設定 google_sheet_id 且服務帳戶 JSON 存在，寫入 Google 試算表；否則寫本機 Excel。
@@ -333,10 +334,76 @@ def _members_map_from_state(state: dict[str, Any]) -> dict[str, list[str]]:
     return out
 
 
-def session_state_from_dataframe(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    """場次鍵 → {members, meta}，供比對與刪除列還原場次欄位。"""
+def _session_date_from_meta(meta: dict[str, Any]) -> date | None:
+    return _parse_session_date_val(meta.get("場次日期"))
+
+
+def filter_state_active_sessions(
+    state: dict[str, dict[str, Any]], today: date
+) -> dict[str, dict[str, Any]]:
+    """只保留場次日期 >= today 的場次，避免已過期活動被誤判為「刪除」。"""
+    out: dict[str, dict[str, Any]] = {}
+    for url, entry in state.items():
+        if not isinstance(entry, dict):
+            continue
+        meta = entry.get("meta") or {}
+        sdate = _session_date_from_meta(meta)
+        if sdate is not None and sdate < today:
+            continue
+        out[str(url)] = entry
+    return out
+
+
+def _session_meta_from_group(grp: pd.DataFrame) -> dict[str, Any]:
+    if grp.empty:
+        return {}
+    first = grp.iloc[0]
+    meta: dict[str, Any] = {}
+    for c in SESSION_META_COLUMNS:
+        if c in grp.columns:
+            meta[c] = _json_safe_value(first[c])
+    return meta
+
+
+def _avatar_url_map_from_df(
+    df: pd.DataFrame, avatar_urls: list[str | None] | None
+) -> dict[tuple[str, str], str]:
+    """(預約頁面, 會員暱稱) → 頭像 URL。"""
+    m: dict[tuple[str, str], str] = {}
+    if df.empty or not avatar_urls or len(avatar_urls) != len(df):
+        return m
+    for pos, (_, row) in enumerate(df.iterrows()):
+        page = str(row.get("預約頁面", "")).strip()
+        name = str(row.get("會員暱稱", "")).strip()
+        if not page or not name or name.startswith("（"):
+            continue
+        u = avatar_urls[pos]
+        if u:
+            m[(page, name)] = str(u).strip()
+    return m
+
+
+def _member_avatars_for_group(
+    grp: pd.DataFrame, avatar_map: dict[tuple[str, str], str], url: str
+) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for name in grp["會員暱稱"].astype(str):
+        name = name.strip()
+        if not name or name.startswith("（"):
+            continue
+        u = avatar_map.get((str(url), name), "")
+        if u:
+            out[name] = u
+    return out
+
+
+def session_state_from_dataframe(
+    df: pd.DataFrame, avatar_urls: list[str | None] | None = None
+) -> dict[str, dict[str, Any]]:
+    """場次鍵 → {members, meta, member_avatars}，供比對與刪除列還原場次欄位。"""
     if df.empty or "預約頁面" not in df.columns or "會員暱稱" not in df.columns:
         return {}
+    avatar_map = _avatar_url_map_from_df(df, avatar_urls)
     out: dict[str, dict[str, Any]] = {}
     for url, grp in df.groupby("預約頁面", sort=False):
         first = grp.iloc[0]
@@ -347,6 +414,7 @@ def session_state_from_dataframe(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
         out[str(url)] = {
             "members": list(grp["會員暱稱"].astype(str)),
             "meta": meta,
+            "member_avatars": _member_avatars_for_group(grp, avatar_map, str(url)),
         }
     return out
 
@@ -432,14 +500,22 @@ def build_history_diff_chunk(
     previous: dict[str, dict[str, Any]],
     current: dict[str, dict[str, Any]],
     columns: list[str],
+    today: date | None = None,
+    avatar_urls: list[str | None] | None = None,
 ) -> pd.DataFrame:
-    """僅產生「新增」「刪除」列；不含場次人數等純欄位更新。"""
+    """僅產生「新增」「刪除」列；不含場次人數等純欄位更新。已過期場次不參與比對。"""
+    if today is None:
+        today = date.today()
+    previous = filter_state_active_sessions(previous, today)
+    current = filter_state_active_sessions(current, today)
+
     scan_at = ""
     if not df.empty and "掃描時間" in df.columns:
         scan_at = str(df["掃描時間"].iloc[0])
 
     records: list[dict[str, Any]] = []
     urls = set(previous) | set(current)
+    avatar_map = _avatar_url_map_from_df(df, avatar_urls)
 
     for url in urls:
         prev_entry = previous.get(url, {})
@@ -488,10 +564,25 @@ def build_history_diff_chunk(
                 base = {**curr_meta, "預約頁面": url, "會員暱稱": name}
             base["掃描時間"] = scan_at
             base["異動類型"] = "新增"
+            base["頭像"] = avatar_map.get((str(url), name), "")
             records.append(base)
 
+        prev_avatars = (
+            prev_entry.get("member_avatars")
+            if isinstance(prev_entry, dict)
+            else {}
+        )
+        if not isinstance(prev_avatars, dict):
+            prev_avatars = {}
+
         for name in removed:
-            base = {**prev_meta, "預約頁面": url, "會員暱稱": name}
+            if not curr_grp.empty:
+                base = _session_meta_from_group(curr_grp)
+            else:
+                base = dict(prev_meta)
+            base["預約頁面"] = url
+            base["會員暱稱"] = name
+            base["頭像"] = str(prev_avatars.get(name, "") or "")
             base.pop("掃描時間", None)
             base["掃描時間"] = scan_at
             base["異動類型"] = "刪除"
@@ -1107,7 +1198,10 @@ def main() -> None:
 
     cols = list(df.columns) if not df.empty else list(OUTPUT_COLUMNS)
     history_cols = list(HISTORY_COLUMNS)
-    current_state = session_state_from_dataframe(df)
+    current_state = session_state_from_dataframe(df, avatar_urls)
+    tz = _scan_timezone(cfg)
+    today = datetime.now(tz).date()
+    current_state = filter_state_active_sessions(current_state, today)
 
     if args.reset_baseline:
         reset_scan_baseline()
@@ -1122,8 +1216,18 @@ def main() -> None:
     appended = 0
     added_n = removed_n = 0
     history_append_df: pd.DataFrame | None = None
-    if had_previous and snapshot_has_member_change(previous, current_state):
-        chunk = build_history_diff_chunk(df, previous, current_state, history_cols)
+    previous_compare = filter_state_active_sessions(previous, today)
+    if had_previous and snapshot_has_member_change(
+        previous_compare, current_state
+    ):
+        chunk = build_history_diff_chunk(
+            df,
+            previous,
+            current_state,
+            history_cols,
+            today=today,
+            avatar_urls=avatar_urls,
+        )
         if not chunk.empty:
             appended = len(chunk)
             if "異動類型" in chunk.columns:

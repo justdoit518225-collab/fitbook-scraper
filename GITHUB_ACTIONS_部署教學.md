@@ -13,7 +13,7 @@
 | 手動 | GitHub 網頁 / App → Actions → **Run workflow** |
 | 機密 | Cookie、服務帳戶 JSON 放在 **Secrets**，不進 Git |
 | 比對檔 | `last_scan_state.json` 用 Actions **Cache** 保留，供「掃描歷史」比對 |
-| 掃描歷史 | 僅記 **新增／刪除**；依**場次日期**近→遠排序。重設初始版：本機執行 `reset_scan_baseline.bat` 或 `python scrape_fitbook.py --reset-baseline` |
+| 掃描歷史 | 僅記 **新增／刪除**（只比對**今天起**的場次，已過期不會誤判刪除）。重設初始版：`reset_scan_baseline.bat` |
 
 ---
 

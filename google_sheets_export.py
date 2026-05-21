@@ -212,8 +212,15 @@ def _df_to_plain_values(df: pd.DataFrame) -> list[list[Any]]:
     rows: list[list[Any]] = [cols]
     if df.empty:
         return rows
+    av_idx = cols.index("頭像") if "頭像" in cols else -1
     for tup in df.itertuples(index=False, name=None):
-        rows.append([_sanitize_cell_for_api(v) for v in tup])
+        line: list[Any] = []
+        for j, v in enumerate(tup):
+            if j == av_idx:
+                line.append(_avatar_cell_value(v))
+            else:
+                line.append(_sanitize_cell_for_api(v))
+        rows.append(line)
     return rows
 
 
@@ -224,6 +231,18 @@ def _image_formula(url: str) -> str:
     if not u:
         return ""
     return f'=IMAGE("{u}")'
+
+
+def _avatar_cell_value(val: Any) -> Any:
+    """掃描歷史頭像欄：URL 轉 =IMAGE()，其餘照舊。"""
+    s = str(val or "").strip()
+    if not s:
+        return ""
+    if s.startswith("=IMAGE"):
+        return s
+    if s.startswith("http://") or s.startswith("https://"):
+        return _image_formula(s)
+    return _sanitize_cell_for_api(val)
 
 
 def _df_to_values_with_images(
