@@ -186,6 +186,37 @@ def _col_a1(n: int) -> str:
     return s
 
 
+def _sanitize_cell_for_api(val: Any) -> Any:
+    """gspread 送 JSON 時不可含 nan/inf；空值改為空字串。"""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, float):
+        if val != val or val in (float("inf"), float("-inf")):
+            return ""
+    if hasattr(val, "item"):
+        try:
+            return _sanitize_cell_for_api(val.item())
+        except (ValueError, AttributeError):
+            pass
+    return val
+
+
+def _df_to_plain_values(df: pd.DataFrame) -> list[list[Any]]:
+    """掃描歷史等純文字表：欄位標題 + 列資料，無 NaN。"""
+    cols = list(df.columns)
+    rows: list[list[Any]] = [cols]
+    if df.empty:
+        return rows
+    for tup in df.itertuples(index=False, name=None):
+        rows.append([_sanitize_cell_for_api(v) for v in tup])
+    return rows
+
+
 def _image_formula(url: str) -> str:
     if pd.isna(url):
         return ""
@@ -379,14 +410,81 @@ def load_history_from_gsheet(cfg: dict[str, Any], columns: list[str]) -> pd.Data
         return pd.DataFrame(columns=columns)
     header, data = rows[0], rows[1:]
     df = pd.DataFrame(data, columns=header[: len(header)])
-    return df.reindex(columns=columns)
+    if "異動類型" not in df.columns:
+        return pd.DataFrame(columns=columns)
+    df = df.reindex(columns=columns)
+    if "掃描時間" in df.columns:
+        df["掃描時間"] = df["掃描時間"].astype(str).str.strip()
+    return df
+
+
+def _history_header_columns() -> list[str]:
+    return ["掃描時間", "異動類型"] + [
+        c for c in OUTPUT_COLUMNS if c != "掃描時間"
+    ]
+
+
+def _write_history_sheet(
+    sh: Any,
+    hw: Any,
+    *,
+    history_append_df: pd.DataFrame | None,
+    history_reset: bool,
+) -> None:
+    """掃描歷史：僅在重設或本次有異動時寫入；插入新列、不改既有列與欄寬。"""
+    header = _history_header_columns()
+    hid = hw.id
+
+    if history_reset:
+        hw.clear()
+        hw.update("A1", [header], value_input_option="USER_ENTERED")
+        return
+
+    if history_append_df is None or history_append_df.empty:
+        return
+
+    plain = _df_to_plain_values(history_append_df)
+    data_rows = plain[1:] if len(plain) > 1 else []
+    if not data_rows:
+        return
+
+    existing = hw.get_all_values()
+    if not existing:
+        hw.update("A1", [header], value_input_option="USER_ENTERED")
+
+    n = len(data_rows)
+    ncol = len(data_rows[0])
+    sh.batch_update(
+        {
+            "requests": [
+                {
+                    "insertDimension": {
+                        "range": {
+                            "sheetId": hid,
+                            "dimension": "ROWS",
+                            "startIndex": 1,
+                            "endIndex": 1 + n,
+                        },
+                        "inheritFromBefore": False,
+                    }
+                }
+            ]
+        }
+    )
+    hw.update(
+        f"A2:{_col_a1(ncol)}{1 + n}",
+        data_rows,
+        value_input_option="USER_ENTERED",
+    )
 
 
 def write_google_sheets(
     df: pd.DataFrame,
-    history_df: pd.DataFrame,
     avatar_urls: list[str | None],
     cfg: dict[str, Any],
+    *,
+    history_append_df: pd.DataFrame | None = None,
+    history_reset: bool = False,
 ) -> str:
     sh = _open_spreadsheet(cfg)
 
@@ -416,29 +514,17 @@ def write_google_sheets(
     if reqs:
         sh.batch_update({"requests": reqs})
 
-    # --- 掃描歷史（純值，無 IMAGE／合併）---
-    hw = _ensure_worksheet(sh, HISTORY_SHEET_NAME)
-    hw.clear()
-    if history_df.empty:
-        hist_vals = [list(history_df.columns)] if len(history_df.columns) else [list(OUTPUT_COLUMNS)]
-    else:
-        hist_vals = [list(history_df.columns)] + history_df.astype(str).values.tolist()
-    if hist_vals and hist_vals[0]:
-        h_end_r = len(hist_vals)
-        h_end_c = len(hist_vals[0])
-        hw.update(
-            f"A1:{_col_a1(h_end_c)}{h_end_r}",
-            hist_vals,
-            value_input_option="USER_ENTERED",
+    # --- 掃描歷史：僅插入新列，不 clear、不調欄寬 ---
+    if history_reset or (
+        history_append_df is not None and not history_append_df.empty
+    ):
+        hw = _ensure_worksheet(sh, HISTORY_SHEET_NAME)
+        _write_history_sheet(
+            sh,
+            hw,
+            history_append_df=history_append_df,
+            history_reset=history_reset,
         )
-        hid = hw.id
-        h_reqs = [
-            _clear_basic_filter(hid),
-            _unmerge_sheet_grid(hid, end_row=max(h_end_r + 500, 2000), end_col=max(h_end_c + 5, 20))
-        ]
-        h_reqs.extend(_format_requests(hid, h_end_r, h_end_c))
-        h_reqs.extend(_column_width_requests(hid, h_end_c))
-        sh.batch_update({"requests": h_reqs})
 
     sid = (cfg.get("google_sheet_id") or "").strip()
     return f"https://docs.google.com/spreadsheets/d/{sid}/edit"

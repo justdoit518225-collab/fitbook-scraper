@@ -6,13 +6,15 @@ FitBook：指定「球敘」場館之場次；僅寫入「已報名人數 > 0」
 之暱稱與頭像網址；每位會員一列，頭像可為 Excel 內嵌圖或 Google 試算表 =IMAGE(url)。
 
 異動歷史：以「預約頁面」為場次、會員暱稱人次（含重複）與上次 last_scan_state.json 比對；
-若有任一场次增減人員或場次增減，將當次完整資料列附加至「掃描歷史」（首次執行僅建立基準不附加）。
+若有異動，僅將「新增／刪除」列插入「掃描歷史」頂端（首次執行僅建立基準不附加）。
+已寫入歷史的「掃描時間」不會再改；無異動時不碰掃描歷史分頁（含欄寬）。
 
 輸出：若 config 設定 google_sheet_id 且服務帳戶 JSON 存在，寫入 Google 試算表；否則寫本機 Excel。
 """
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -46,6 +48,19 @@ OUTPUT_COLUMNS = [
     "頭像",
     "預約頁面",
 ]
+
+HISTORY_COLUMNS = ["掃描時間", "異動類型"] + [
+    c for c in OUTPUT_COLUMNS if c != "掃描時間"
+]
+
+# 不含掃描時間：避免比對檔 meta 每次被覆寫，歷史列的掃描時間僅在寫入當下設定一次
+SESSION_META_COLUMNS = [
+    c
+    for c in OUTPUT_COLUMNS
+    if c not in ("會員暱稱", "頭像", "掃描時間")
+]
+
+SCAN_STATE_VERSION = 2
 
 
 def load_config() -> dict[str, Any]:
@@ -289,34 +304,202 @@ def session_members_snapshot(df: pd.DataFrame) -> dict[str, list[str]]:
     return out
 
 
-def load_last_scan_state() -> dict[str, list[str]]:
+def _json_safe_value(val: Any) -> Any:
+    """將 pandas/numpy 純量轉成 JSON 可序列化的 Python 型別。"""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(val, "item"):
+        try:
+            return val.item()
+        except (ValueError, AttributeError):
+            pass
+    if isinstance(val, (datetime, date)):
+        return val.isoformat()
+    return val
+
+
+def _members_map_from_state(state: dict[str, Any]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for k, v in state.items():
+        if isinstance(v, dict) and "members" in v:
+            out[str(k)] = list(v["members"])
+        elif isinstance(v, list):
+            out[str(k)] = list(v)
+    return out
+
+
+def session_state_from_dataframe(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    """場次鍵 → {members, meta}，供比對與刪除列還原場次欄位。"""
+    if df.empty or "預約頁面" not in df.columns or "會員暱稱" not in df.columns:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for url, grp in df.groupby("預約頁面", sort=False):
+        first = grp.iloc[0]
+        meta: dict[str, Any] = {}
+        for c in SESSION_META_COLUMNS:
+            if c in grp.columns:
+                meta[c] = _json_safe_value(first[c])
+        out[str(url)] = {
+            "members": list(grp["會員暱稱"].astype(str)),
+            "meta": meta,
+        }
+    return out
+
+
+def load_last_scan_state() -> dict[str, dict[str, Any]]:
     if not LAST_SCAN_STATE_PATH.is_file():
         return {}
     try:
         raw = json.loads(LAST_SCAN_STATE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            return {}
-        return {str(k): list(v) for k, v in raw.items() if isinstance(v, list)}
     except (json.JSONDecodeError, OSError, TypeError):
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    if raw.get("version") == SCAN_STATE_VERSION and isinstance(raw.get("sessions"), dict):
+        sessions = raw["sessions"]
+        return {
+            str(k): v
+            for k, v in sessions.items()
+            if isinstance(v, dict) and "members" in v
+        }
+    # v1：僅 { url: [暱稱, ...] }
+    return {
+        str(k): {"members": list(v), "meta": {}}
+        for k, v in raw.items()
+        if isinstance(v, list)
+    }
 
 
-def save_last_scan_state(snap: dict[str, list[str]]) -> None:
+def save_last_scan_state(state: dict[str, dict[str, Any]]) -> None:
     LAST_SCAN_STATE_PATH.write_text(
-        json.dumps(snap, ensure_ascii=False, indent=2),
+        json.dumps(
+            {"version": SCAN_STATE_VERSION, "sessions": state},
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
 
 def snapshot_has_member_change(
-    previous: dict[str, list[str]], current: dict[str, list[str]]
+    previous: dict[str, dict[str, Any]], current: dict[str, dict[str, Any]]
 ) -> bool:
     """任一场次暱稱人次（Counter）不同、場次新增或消失，皆視為有異動。"""
-    keys = set(previous) | set(current)
+    prev_m = _members_map_from_state(previous)
+    curr_m = _members_map_from_state(current)
+    keys = set(prev_m) | set(curr_m)
     for k in keys:
-        if Counter(previous.get(k, [])) != Counter(current.get(k, [])):
+        if Counter(prev_m.get(k, [])) != Counter(curr_m.get(k, [])):
             return True
     return False
+
+
+def _multiset_added_removed(
+    previous: list[str], current: list[str]
+) -> tuple[list[str], list[str]]:
+    pc, cc = Counter(previous), Counter(current)
+    added: list[str] = []
+    removed: list[str] = []
+    for name in set(pc) | set(cc):
+        delta = cc[name] - pc[name]
+        if delta > 0:
+            added.extend([name] * delta)
+        delta = pc[name] - cc[name]
+        if delta > 0:
+            removed.extend([name] * delta)
+    return added, removed
+
+
+def _take_member_row(
+    grp: pd.DataFrame, name: str, used: set[Any]
+) -> pd.Series | None:
+    for idx, row in grp.iterrows():
+        if idx in used:
+            continue
+        if str(row.get("會員暱稱", "")) == name:
+            used.add(idx)
+            return row
+    return None
+
+
+def build_history_diff_chunk(
+    df: pd.DataFrame,
+    previous: dict[str, dict[str, Any]],
+    current: dict[str, dict[str, Any]],
+    columns: list[str],
+) -> pd.DataFrame:
+    """僅產生「新增」「刪除」列；不含場次人數等純欄位更新。"""
+    scan_at = ""
+    if not df.empty and "掃描時間" in df.columns:
+        scan_at = str(df["掃描時間"].iloc[0])
+
+    records: list[dict[str, Any]] = []
+    urls = set(previous) | set(current)
+
+    for url in urls:
+        prev_entry = previous.get(url, {})
+        curr_entry = current.get(url, {})
+        prev_m = (
+            list(prev_entry.get("members", []))
+            if isinstance(prev_entry, dict)
+            else []
+        )
+        curr_m = (
+            list(curr_entry.get("members", []))
+            if isinstance(curr_entry, dict)
+            else []
+        )
+        added, removed = _multiset_added_removed(prev_m, curr_m)
+        if not added and not removed:
+            continue
+
+        prev_meta = (
+            dict(prev_entry.get("meta") or {})
+            if isinstance(prev_entry, dict)
+            else {}
+        )
+        curr_meta = (
+            dict(curr_entry.get("meta") or {})
+            if isinstance(curr_entry, dict)
+            else {}
+        )
+        curr_grp = (
+            df[df["預約頁面"].astype(str) == str(url)]
+            if not df.empty and "預約頁面" in df.columns
+            else pd.DataFrame()
+        )
+        used: set[Any] = set()
+
+        for name in added:
+            base: dict[str, Any]
+            row = _take_member_row(curr_grp, name, used) if not curr_grp.empty else None
+            if row is not None:
+                base = {
+                    c: row[c]
+                    for c in row.index
+                    if c in columns and c != "掃描時間"
+                }
+            else:
+                base = {**curr_meta, "預約頁面": url, "會員暱稱": name}
+            base["掃描時間"] = scan_at
+            base["異動類型"] = "新增"
+            records.append(base)
+
+        for name in removed:
+            base = {**prev_meta, "預約頁面": url, "會員暱稱": name}
+            base.pop("掃描時間", None)
+            base["掃描時間"] = scan_at
+            base["異動類型"] = "刪除"
+            records.append(base)
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(records).reindex(columns=columns).fillna("")
 
 
 def load_history_dataframe(
@@ -332,7 +515,12 @@ def load_history_dataframe(
         hist = pd.read_excel(out_path, sheet_name=HISTORY_SHEET_NAME)
     except (ValueError, OSError):
         return pd.DataFrame(columns=columns)
-    return hist.reindex(columns=columns)
+    if "異動類型" not in hist.columns:
+        return pd.DataFrame(columns=columns)
+    hist = hist.reindex(columns=columns)
+    if "掃描時間" in hist.columns:
+        hist["掃描時間"] = hist["掃描時間"].astype(str).str.strip()
+    return hist
 
 
 def _parse_session_date_val(val: Any) -> date | None:
@@ -382,7 +570,7 @@ def _as_text_cell(x: Any) -> str:
 
 
 def _sort_dataframe_by_session_date(df: pd.DataFrame) -> pd.DataFrame:
-    """以場次日期遞增排序（越近的日期越上）；同場次、無法解析日期者接在最後。
+    """以場次日期遞增排序（日期越接近今天越靠上）；無法解析者排最後。
     次要排序：預約頁面、場館、時段、會員，使同一活動的列維持相鄰。
     """
     if df.empty or "場次日期" not in df.columns:
@@ -391,8 +579,17 @@ def _sort_dataframe_by_session_date(df: pd.DataFrame) -> pd.DataFrame:
     out["_dt"] = pd.to_datetime(out["場次日期"], errors="coerce")
     sub = ("預約頁面", "場館標籤", "時段", "會員暱稱")
     by = ["_dt"] + [c for c in sub if c in out.columns]
-    out = out.sort_values(by=by, na_position="last").reset_index(drop=True)
+    out = out.sort_values(by=by, ascending=True, na_position="last").reset_index(
+        drop=True
+    )
     return out.drop(columns=["_dt"])
+
+
+def reset_scan_baseline(*, clear_history: bool = True) -> None:
+    """刪除比對檔，下次執行視為初始版（不追加掃描歷史）。clear_history 僅供呼叫端提示。"""
+    if LAST_SCAN_STATE_PATH.is_file():
+        LAST_SCAN_STATE_PATH.unlink()
+    _ = clear_history
 
 
 def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
@@ -798,62 +995,174 @@ def _apply_font_microsoft_jhenghei_and_header_fill(ws: Any, df: pd.DataFrame) ->
                 cell.font = body_font
 
 
+def _write_sessions_sheet_openpyxl(
+    wb: Any,
+    df: pd.DataFrame,
+    cfg: dict[str, Any],
+    avatar_urls: list[str | None],
+    session: requests.Session,
+) -> None:
+    from openpyxl import Workbook
+
+    max_px = int(cfg.get("avatar_max_px") or 52)
+    if "sessions" in wb.sheetnames:
+        del wb["sessions"]
+    ws = wb.create_sheet("sessions", 0)
+    if not df.empty:
+        for j, col in enumerate(df.columns, start=1):
+            ws.cell(1, j, value=col)
+        for i, row in enumerate(df.itertuples(index=False), start=2):
+            for j, val in enumerate(row, start=1):
+                ws.cell(i, j, value=val)
+    _autofit_worksheet_columns(ws, df)
+    if cfg.get("merge_session_cells", True):
+        _merge_session_info_cells(ws, df)
+    _embed_avatars(ws, df, avatar_urls, session, max_px)
+    _apply_font_microsoft_jhenghei_and_header_fill(ws, df)
+    if isinstance(wb, Workbook) and "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
+        try:
+            wb.remove(wb["Sheet"])
+        except (ValueError, KeyError):
+            pass
+
+
+def _append_history_rows_openpyxl(ws: Any, append_df: pd.DataFrame) -> None:
+    """在標題列下方插入新列（舊列下移），不調整欄寬。"""
+    n = len(append_df)
+    if n <= 0:
+        return
+    ws.insert_rows(2, amount=n)
+    cols = list(append_df.columns)
+    for i in range(n):
+        for j, c in enumerate(cols, start=1):
+            val = append_df.iloc[i][c]
+            if pd.isna(val):
+                val = ""
+            ws.cell(2 + i, j, value=val)
+
+
 def write_excel(
     df: pd.DataFrame,
     cfg: dict[str, Any],
     avatar_urls: list[str | None],
     session: requests.Session,
-    history_df: pd.DataFrame,
+    *,
+    history_append_df: pd.DataFrame | None = None,
+    history_reset: bool = False,
 ) -> Path:
+    from openpyxl import Workbook, load_workbook
+
     out = Path(__file__).resolve().parent / cfg["output_excel"]
-    max_px = int(cfg.get("avatar_max_px") or 52)
+    history_cols = list(HISTORY_COLUMNS)
+    touch_history = history_reset or (
+        history_append_df is not None and not history_append_df.empty
+    )
 
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="sessions", index=False)
-        sheet = writer.sheets["sessions"]
-        _autofit_worksheet_columns(sheet, df)
-        if cfg.get("merge_session_cells", True):
-            _merge_session_info_cells(sheet, df)
-        _embed_avatars(sheet, df, avatar_urls, session, max_px)
-        _apply_font_microsoft_jhenghei_and_header_fill(sheet, df)
+    if out.is_file() and not touch_history:
+        wb = load_workbook(out)
+        _write_sessions_sheet_openpyxl(wb, df, cfg, avatar_urls, session)
+        wb.save(out)
+        return out
 
-        history_df.to_excel(writer, sheet_name=HISTORY_SHEET_NAME, index=False)
-        hs = writer.sheets[HISTORY_SHEET_NAME]
-        _autofit_worksheet_columns(hs, history_df)
-        _apply_font_microsoft_jhenghei_and_header_fill(hs, history_df)
+    if out.is_file():
+        wb = load_workbook(out)
+    else:
+        wb = Workbook()
+
+    _write_sessions_sheet_openpyxl(wb, df, cfg, avatar_urls, session)
+
+    if history_reset:
+        if HISTORY_SHEET_NAME in wb.sheetnames:
+            del wb[HISTORY_SHEET_NAME]
+        hs = wb.create_sheet(HISTORY_SHEET_NAME)
+        for j, h in enumerate(history_cols, start=1):
+            hs.cell(1, j, value=h)
+    elif history_append_df is not None and not history_append_df.empty:
+        if HISTORY_SHEET_NAME in wb.sheetnames:
+            hs = wb[HISTORY_SHEET_NAME]
+        else:
+            hs = wb.create_sheet(HISTORY_SHEET_NAME)
+            for j, h in enumerate(history_cols, start=1):
+                hs.cell(1, j, value=h)
+        _append_history_rows_openpyxl(hs, history_append_df)
+
+    wb.save(out)
     return out
 
 
 def main() -> None:
     from google_sheets_export import google_sheets_enabled, write_google_sheets
 
+    parser = argparse.ArgumentParser(description="FitBook 場次爬蟲")
+    parser.add_argument(
+        "--reset-baseline",
+        action="store_true",
+        help="清空比對基準與掃描歷史，本次掃描結果作為初始版（不寫入新增/刪除列）",
+    )
+    args = parser.parse_args()
+
     cfg = load_config()
     out = Path(__file__).resolve().parent / cfg["output_excel"]
     df, avatar_urls, session = run_once()
 
     cols = list(df.columns) if not df.empty else list(OUTPUT_COLUMNS)
-    snap = session_members_snapshot(df)
-    had_previous = LAST_SCAN_STATE_PATH.is_file()
-    previous = load_last_scan_state() if had_previous else {}
+    history_cols = list(HISTORY_COLUMNS)
+    current_state = session_state_from_dataframe(df)
 
-    history_df = load_history_dataframe(out, cols, cfg)
+    if args.reset_baseline:
+        reset_scan_baseline()
+        had_previous = False
+        previous: dict[str, dict[str, Any]] = {}
+        baseline_reset = True
+    else:
+        baseline_reset = False
+        had_previous = LAST_SCAN_STATE_PATH.is_file()
+        previous = load_last_scan_state() if had_previous else {}
+
     appended = 0
-    if had_previous and snapshot_has_member_change(previous, snap):
-        chunk = df.reindex(columns=cols)
-        history_df = pd.concat([history_df, chunk], ignore_index=True)
-        appended = len(chunk)
+    added_n = removed_n = 0
+    history_append_df: pd.DataFrame | None = None
+    if had_previous and snapshot_has_member_change(previous, current_state):
+        chunk = build_history_diff_chunk(df, previous, current_state, history_cols)
+        if not chunk.empty:
+            appended = len(chunk)
+            if "異動類型" in chunk.columns:
+                added_n = int((chunk["異動類型"] == "新增").sum())
+                removed_n = int((chunk["異動類型"] == "刪除").sum())
+            history_append_df = _sort_dataframe_by_session_date(chunk)
 
+    history_reset = baseline_reset
     if google_sheets_enabled(cfg):
-        url = write_google_sheets(df, history_df, avatar_urls, cfg)
+        url = write_google_sheets(
+            df,
+            avatar_urls,
+            cfg,
+            history_append_df=history_append_df,
+            history_reset=history_reset,
+        )
         path_msg = url
     else:
-        path_msg = str(write_excel(df, cfg, avatar_urls, session, history_df))
+        path_msg = str(
+            write_excel(
+                df,
+                cfg,
+                avatar_urls,
+                session,
+                history_append_df=history_append_df,
+                history_reset=history_reset,
+            )
+        )
 
-    save_last_scan_state(snap)
+    save_last_scan_state(current_state)
 
     msg = f"寫入: {path_msg}，目前筆數: {len(df)}"
-    if appended:
-        msg += f"；因人員異動已附加至「{HISTORY_SHEET_NAME}」: {appended} 列"
+    if baseline_reset:
+        msg += f"；已重設比對基準（本次為初始版），「{HISTORY_SHEET_NAME}」已清空"
+    elif appended:
+        msg += (
+            f"；人員異動已附加至「{HISTORY_SHEET_NAME}」: {appended} 列"
+            f"（新增 {added_n}、刪除 {removed_n}）"
+        )
     elif had_previous:
         msg += f"；與上次比對無場次人員異動，未追加歷史"
     else:

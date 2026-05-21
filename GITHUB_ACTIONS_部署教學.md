@@ -13,6 +13,7 @@
 | 手動 | GitHub 網頁 / App → Actions → **Run workflow** |
 | 機密 | Cookie、服務帳戶 JSON 放在 **Secrets**，不進 Git |
 | 比對檔 | `last_scan_state.json` 用 Actions **Cache** 保留，供「掃描歷史」比對 |
+| 掃描歷史 | 僅記 **新增／刪除**；依**場次日期**近→遠排序。重設初始版：本機執行 `reset_scan_baseline.bat` 或 `python scrape_fitbook.py --reset-baseline` |
 
 ---
 
@@ -118,240 +119,273 @@ git push -u origin main
 | 需求 | 做法 |
 |------|------|
 | 看資料 | Google 試算表 App |
-| 立刻更新一次 | 安裝 **GitHub App** → 你的倉庫 → **Actions** → **FitBook Scrape** → **Run workflow** |
+| 立刻更新一次 | 主畫面 **FitBook 更新** 捷徑（見下方教學），或 **GitHub App** → Actions → **Run workflow** |
 | Cookie 過期 | 用電腦瀏覽器更新 Secret `FITBOOK_COOKIE`（Settings → Secrets） |
 | 看有沒有跑 | GitHub App / 網頁 → Actions 看最近紀錄 |
 
 ---
 
-## iPhone 主畫面一鍵「跑爬蟲」（捷徑 App 詳細教學）
+## iPhone 主畫面一鍵「跑爬蟲」（新版 iOS 捷徑完整教學）
 
-GitHub App **無法**把 Run workflow 放在首頁。下面用 iPhone **「捷徑」** 做一顆主畫面按鈕，按下去 = 在 GitHub 上執行一次 **FitBook Scrape**（與 Actions 裡按 Run workflow 相同）。
+> **適用：** iOS 17／18 及更新版本（含 iOS 26）。  
+> **說明：** 新版「捷徑」**沒有「神奇變數」** 字樣；改用手動 **「設定變數」** + **「選擇變數」**／鍵盤上方 **小標籤**。  
+> 本教學**只走一條路**，照順序做即可。
 
-預計時間：第一次約 **15～20 分鐘**（含申請 Token），之後按一下即可。
+**你會得到什麼：** 主畫面多一顆 **FitBook 更新** 按鈕 → 按一下 = GitHub 執行一次 **FitBook Scrape**（等同網頁 Actions 的 Run workflow）。
+
+**預計時間：** 第一次約 20 分鐘；之後每次約 5 秒。
 
 ---
 
-### 第一部分：申請 GitHub Token（只做一次）
+### 零、新版介面名詞對照（先看這段）
 
-Token 像「遙控器密碼」，讓捷徑有權限幫你觸發 workflow。
+| 你可能看到的 | 意思 |
+|--------------|------|
+| **加入動作** | 在捷徑裡新增一步 |
+| **文字** | 放一段固定文字（Token、JSON） |
+| **設定變數** | 把上一步結果「取名」存起來（英文 *Set variable*） |
+| **選擇變數** | 點輸入欄後，從清單選先前步驟的輸出 |
+| 鍵盤上方的 **小標籤** | 寫著「文字」「AuthHeader」等，點一下插入 |
+| **取得 URL 內容** | 發送網路請求（英文 *Get Contents of URL*） |
+| **標頭** | HTTP Headers |
+| **要求內文** | POST 要送出的內容（Request Body） |
 
-1. 用 iPhone **Safari** 開啟（建議登入 GitHub 帳號）：  
+**選變數的三種方式（任一出現就用）：**
+
+1. 點空白欄位 → 點 **選擇變數** → 點 `AuthHeader` 或 **文字**  
+2. 點空白欄位 → 鍵盤**上方**出現小標籤 → 點 **AuthHeader** 或 **文字**  
+3. 點欄位左側的 **×** 或 **變數圖示** → 從清單選  
+
+選對後，欄位裡會出現**一行膠囊**（不是空白、也不是要你手打整串 token）。
+
+---
+
+### 一、申請 GitHub Token（只做一次）
+
+Token = 讓捷徑有權限代你「按」Run workflow。
+
+1. iPhone 用 **Safari** 開（請先登入 GitHub）：  
    https://github.com/settings/tokens  
 
-2. 點 **Generate new token** → 選 **Generate new token (fine-grained token)**  
-   （若只有 Classic 也可，見文末「替代方案」）
+2. 點綠色 **Generate new token**  
 
-3. **Token name** 隨意填，例如：`iPhone-FitBook`
+3. 選 **Generate new token (fine-grained token)**  
+   - 若畫面只有 Classic，見本文最後 **附錄：Classic Token**
 
-4. **Expiration** 建議選 **90 days** 或 **No expiration**（到期要重做 Token）
+4. 填寫：
+   - **Token name：** `iPhone-FitBook`（隨意）
+   - **Expiration：** 建議 **90 days**（到期要重做）
+   - **Repository access：** 選 **Only select repositories** → 只勾 **`fitbook-scraper`**
+   - **Repository permissions** 往下找：
+     - **Actions** → 改成 **Read and write**
+     - **Metadata** → **Read**（通常已有）
 
-5. **Repository access** 選 **Only select repositories** → 勾選 **`fitbook-scraper`**
+5. 最下面 **Generate token**
 
-6. 展開 **Repository permissions**，設定：
-   - **Actions** → **Read and write**
-   - **Metadata** → **Read**（通常預設就有）
-
-7. 拉到最下面點 **Generate token**
-
-8. 畫面會出現以 `github_pat_` 開頭的一長串 → 點 **複製**  
-   - **只會顯示這一次**，請貼到「備忘錄」或「密碼」App 暫存  
-   - **不要**傳給任何人、不要貼到群組
-
----
-
-### 第二部分：建立捷徑（逐步操作）
-
-#### 步驟 1：開新捷徑
-
-1. 打開 iPhone **「捷徑」** App（紫色圖示）
-2. 下方點 **「捷徑」** 分頁
-3. 右上角 **＋**（建立捷徑）
-4. 若出現「建立個人捷徑」等說明，點掉或略過即可
-
-#### 步驟 2～4：兩種作法（新版 iOS 請用「作法 A」）
-
-> **說明：** 舊教學裡的 **「神奇變數」** 在 **iOS 17／18 以後** 常已看不到這四個字。  
-> 現在改成：**點欄位 →「選擇變數」**，或點鍵盤上方的 **藍色／灰色小標籤**（寫著「文字」「AuthHeader」等）。  
-> 若你找不到，請直接用下面 **作法 A（設定變數）**，最穩。
+6. 出現 `github_pat_` 開頭的一長串 → 點 **複製**  
+   - 貼到 **備忘錄** 暫存（只顯示這一次）  
+   - **勿**傳給他人、勿貼群組
 
 ---
 
-##### 作法 A（推薦）：用「設定變數」— 不依賴神奇變數
+### 二、建立捷徑（共 8 個動作，請依序）
 
-**2A-1：Token 文字**
+#### 動作 1：開新捷徑
 
-1. **加入動作** → 搜尋 **文字**
-2. 內容**一行**貼好（`Bearer ` 後面有空格，再接 token）：
+1. 打開 **捷徑** App（紫色圖示）  
+2. 底部分頁選 **捷徑**  
+3. 右上角 **＋**  
+4. 出現空白編輯畫面即可（可關閉「新手上路」提示）
+
+---
+
+#### 動作 2：文字 — 登入用 Token（一行）
+
+1. 點 **加入動作**（或底部搜尋）  
+2. 搜尋 **文字** → 點 **文字**  
+3. 在輸入框內**一次貼完整行**（範例格式）：
 
 ```text
-Bearer github_pat_你的完整Token貼在這裡
+Bearer github_pat_xxxxxxxxxxxxxxxx
 ```
 
-**2A-2：把 Token 存成變數**
+**注意：**
 
-1. **加入動作** → 搜尋 **設定變數**（英文 *Set variable*）
-2. **變數** 名稱輸入：`AuthHeader`（可自訂，但下面要選同名）
-3. **輸入** 欄：點一下 → 在鍵盤上方或彈出清單選 **文字**（上一步的輸出）  
-   - 若看到 **選擇變數** → 點進去 → 選 **文字**  
-   - 選對後欄位裡會出現類似 `AuthHeader` 或「文字」的**小標籤**，不是空白
+- `Bearer` 後面**一定要有一個空格**  
+- `github_pat_` 換成你備忘錄裡複製的整串  
+- **整段在同一行**，不要斷成兩行  
 
-**2A-3：JSON 文字**
+4. （可選）長按動作標題 **文字** → 重新命名為 `Token文字`
 
-1. 再加 **文字**，內容：
+---
+
+#### 動作 3：設定變數 — 取名 AuthHeader
+
+1. **加入動作** → 搜尋 **設定變數**（或 **Set variable**）  
+2. **變數**（名稱）欄輸入：`AuthHeader`（大小寫建議照抄）  
+3. **輸入** 欄（要接上一步的 Token）：
+   - **點一下「輸入」欄**（游標閃爍）  
+   - 看鍵盤**上方**有沒有 **文字** 或 **Token文字** 小標籤 → **點它**  
+   - 若沒有標籤：點 **選擇變數** → 在清單點 **文字**（通常是上一個動作）  
+   - 成功時「輸入」欄會出現 **AuthHeader** 或 **文字** 的**膠囊**，不是空白  
+
+4. 確認：展開動作 2 的「文字」仍顯示 `Bearer github_pat_...`
+
+---
+
+#### 動作 4：文字 — 觸發分支 JSON
+
+1. **加入動作** → **文字**  
+2. 內容**照抄**（含大括號、雙引號）：
 
 ```json
 {"ref":"main"}
 ```
 
-**2A-4：把 JSON 存成變數**
+3. （可選）重新命名為 `JSON文字`
 
-1. 再加 **設定變數**
-2. 變數名稱：`JsonBody`
-3. **輸入** 選上一步的 **文字** 輸出（同 2A-2 的選法）
+---
 
-**2A-5：取得 URL 內容**
+#### 動作 5：設定變數 — 取名 JsonBody
 
-1. **加入動作** → **取得 URL 內容**
-2. **URL** 貼上：
+1. **加入動作** → **設定變數**  
+2. **變數** 名稱：`JsonBody`  
+3. **輸入** 欄：同動作 3 的方式，選**上一個「文字」**（內容是 `{"ref":"main"}` 那個）  
+   - 清單裡若有兩個「文字」，看預覽：一個是 `Bearer` 開頭、一個是 `{` 開頭 → 選 `{` 那個  
+4. 成功時「輸入」欄有 **JsonBody** 膠囊  
+
+> **若 JSON 變數怎麼都選不上：** 可跳過動作 4、5，在動作 6 的「要求內文」**直接手打** `{"ref":"main"}`（見動作 6 備註）。
+
+---
+
+#### 動作 6：取得 URL 內容 — 送出到 GitHub（核心）
+
+1. **加入動作** → 搜尋 **URL** → 選 **取得 URL 內容**  
+
+2. **URL** 欄貼上（長按貼上，避免少字）：
 
 ```text
 https://api.github.com/repos/justdoit518225-collab/fitbook-scraper/actions/workflows/scrape-fitbook.yml/dispatches
 ```
 
-3. **顯示更多** → **方法** 選 **POST**
-4. **要求內文**：
-   - 類型 **JSON**（或「檔案」）
-   - 內容欄點一下 → **選擇變數** → 選 **`JsonBody`**（或選「文字」若你沒命名變數、選第二個文字動作）
-5. **標頭** 新增 4 筆：
+3. 點 **顯示更多**（或 **▼**）展開  
 
-| 標頭名稱 | 標頭值 |
-|----------|--------|
-| `Accept` | `application/vnd.github+json`（直接打字貼上） |
-| `Authorization` | 點欄位 → **選擇變數** → 選 **`AuthHeader`** |
-| `Content-Type` | `application/json` |
-| `X-GitHub-Api-Version` | `2022-11-28` |
+4. **方法** → 改成 **POST**（預設常是 GET，必須改）  
 
----
+5. **要求內文**（或 Request Body）：
+   - 若有 **類型**：選 **JSON** 或 **檔案**  
+   - **內容** 欄：
+     - **方式甲：** 點欄位 → **選擇變數** → 選 **JsonBody**  
+     - **方式乙：** 直接手打 `{"ref":"main"}`（沒做動作 4、5 時用這個）  
 
-##### 作法 B：不建「設定變數」，新版介面直接選上一動作
+6. **標頭**（Headers）— 點 **新增標頭** / **+** 共 **4 筆**：
 
-**B-1～B-2：** 同樣做兩個 **文字** 動作（Token 一行、JSON 一行），**可不做**設定變數。
+| # | 標頭名稱（鍵） | 標頭值（值）怎麼填 |
+|---|----------------|-------------------|
+| 1 | `Accept` | 直接貼：`application/vnd.github+json` |
+| 2 | `Authorization` | 點「值」欄 → **選擇變數** → 選 **AuthHeader**（勿選 JsonBody） |
+| 3 | `Content-Type` | 直接貼：`application/json` |
+| 4 | `X-GitHub-Api-Version` | 直接貼：`2022-11-28` |
 
-**B-3：取得 URL 內容**
+**Authorization 檢查（最常錯）：**
 
-- **要求內文**：點內容欄 → 看鍵盤**上方**是否出現 **「文字」** 小標籤 → 點它（要選**第二個**文字，內容是 `{"ref":"main"}` 那個）  
-  - 或點欄位 → **選擇變數** / **Select Variable** → 點列表裡對應的 **文字**
-- **Authorization 標頭值**：點值欄 → 選**第一個** **文字**（Bearer 開頭那個）  
-  - 選對時會變成**一行小膠囊**卡在欄位裡，不要整段 token 用手打
+- 「值」欄應是 **AuthHeader** 膠囊，不是手打 token  
+- 不要選成 JsonBody，否則 GitHub 回 401  
 
-**如何分辨選對哪個「文字」：**  
-在變數列表或預覽裡，一個開頭是 `Bearer`，另一個是 `{`；選錯會 401。
+7. 其餘開關保持預設（不用填帳號／密碼）
 
 ---
 
-##### 作法 C（最簡）：JSON 不用變數，手動貼
+#### 動作 7：顯示通知 — 按完有提示
 
-若 **要求內文** 一直選不到變數：
+1. **加入動作** → **顯示通知**  
+2. **標題：** `FitBook`  
+3. **內文：** `已送出爬蟲，約 1～3 分鐘後請刷新試算表`  
+4. （可選）再加 **震動**
 
-1. **要求內文** 類型選 JSON
-2. 內容欄**直接手打**（不要選變數）：
+---
 
-```json
-{"ref":"main"}
-```
+#### 動作 8：命名並試跑
 
-3. **Authorization** 仍要用變數或「設定變數」的 `AuthHeader`（token 太長不建議手打）
+1. 點左上角 **完成**（或 **✓**）  
+2. 點頂部名稱 **新捷徑** → 改名 **`FitBook 更新`**  
+3. 點 **▶**（播放）試跑  
 
-**作法 A 完成後的動作順序：**
+**成功怎麼看：**
+
+1. 出現通知、捷徑**沒有紅字錯誤**  
+2. 打開 **GitHub App** → 倉庫 **fitbook-scraper** → **Actions** → 看到新的 **FitBook Scrape**（黃色進行中或綠色完成）  
+3. 1～3 分鐘後開 **Google 試算表** → **sessions** 分頁刷新  
+
+---
+
+### 三、加到 iPhone 主畫面
+
+1. 在「捷徑」列表點開 **FitBook 更新**  
+2. 點右上角 **ⓘ**（圓圈 i）或 **⋯** → **詳細資料**  
+3. 點 **加入主畫面**  
+4. 可改顯示名稱、選圖示顏色 → 右上角 **加入**  
+5. 回主畫面，會多一顆 App 圖示  
+
+以後：**點圖示** → 等通知 → 刷新試算表。
+
+---
+
+### 四、完成後請對照（動作順序）
+
+從**上到下**必須是這 7～8 段（JSON 若手打可少 2 段）：
 
 ```text
-文字（Bearer + Token）
-設定變數 → AuthHeader
-文字（{"ref":"main"}）
-設定變數 → JsonBody
-取得 URL 內容（POST + 4 標頭）
-顯示通知
+① 文字           Bearer github_pat_...（一行）
+② 設定變數         變數名 AuthHeader ← 輸入選 ①
+③ 文字           {"ref":"main"}
+④ 設定變數         變數名 JsonBody   ← 輸入選 ③
+⑤ 取得 URL 內容    POST + URL + 4 標頭 + JsonBody（或手打 JSON）
+⑥ 顯示通知
 ```
 
-#### 步驟 5：成功提示（建議）
-
-1. **加入動作** → 搜尋 **顯示通知**
-2. 標題：`FitBook`
-3. 內文：`已送出爬蟲，約 1～3 分鐘後請刷新試算表`
-
-（也可加 **「震動」** 動作，按完會震一下。）
-
-#### 步驟 6：命名並試跑
-
-1. 點左上角 **完成** 或 **✓**
-2. 點上方名稱（預設「新捷徑」）→ 改名為 **`FitBook 更新`**
-3. 點名稱下方的 **▶ 播放** 試跑一次
-
-**如何確認成功：**
-
-1. 若出現通知「已送出爬蟲…」且**沒有紅色錯誤** → 多半成功  
-2. 打開 **GitHub App** → 進入 **justdoit518225-collab/fitbook-scraper** → **Actions**  
-3. 應看到新的 **FitBook Scrape** 在跑或剛跑完（黃點/綠勾）  
-4. 約 1～3 分鐘後開 **Google 試算表** 看 `sessions` 是否更新  
-
----
-
-### 第三部分：加到主畫面（像 App 圖示）
-
-1. 在「捷徑」裡打開 **FitBook 更新** 這條捷徑
-2. 點右上角 **ⓘ**（資料圖示）或 **⋯** → **詳細資料**
-3. 選 **加入主畫面**
-4. 可改圖示名稱、選顏色 → 點右上角 **加入**
-5. 回到主畫面，會多一顆 **FitBook 更新** 圖示
-
-之後：**點主畫面圖示** → 等通知 → 去試算表刷新。
-
----
-
-### 第四部分：捷徑動作順序檢查（請對照）
-
-**作法 A（推薦）** 從上到下應為：
+**簡化版（JSON 手打時）：**
 
 ```text
-1. 文字          → Bearer github_pat_...（一行）
-2. 設定變數      → AuthHeader = 上一步文字
-3. 文字          → {"ref":"main"}
-4. 設定變數      → JsonBody = 上一步文字
-5. 取得 URL 內容 → POST + 4 標頭 + JsonBody
-6. 顯示通知
+① 文字 → Bearer token
+② 設定變數 → AuthHeader
+③ 取得 URL 內容 → POST，內文手打 {"ref":"main"}，Authorization 選 AuthHeader
+④ 顯示通知
 ```
 
-順序不要顛倒；**Authorization** 一定要選到 `AuthHeader`（或第一個文字），不是 JsonBody。
+---
+
+### 五、常見問題
+
+| 狀況 | 原因 | 處理 |
+|------|------|------|
+| 找不到「選擇變數」 | 要先點**輸入欄**才會出現 | 點欄位 → 看鍵盤上方小標籤 |
+| 輸入欄一直是空白 | 沒選到上一動作 | 重做動作 3，選「文字」膠囊 |
+| 401 / Bad credentials | Authorization 錯 | 確認 Bearer+空格+token；標頭值選 AuthHeader |
+| 404 | URL 錯 | 完整貼上教學裡的網址 |
+| 422 | 分支名錯 | 內文必須 `{"ref":"main"}` |
+| Actions 沒新紀錄 | Token 權限不足 | Actions 改 Read and write |
+| 試算表沒更新 | Cookie 過期 | 更新 GitHub Secret `FITBOOK_COOKIE`（見下方章節） |
+| 捷徑成功但資料舊 | 爬蟲還在跑 | 等 1～3 分鐘再刷新 |
 
 ---
 
-### 常見錯誤排除
+### 附錄：Classic Token（沒有 fine-grained 時）
 
-| 現象 | 可能原因 | 處理 |
-|------|----------|------|
-| 捷徑跑完但 Actions 沒新紀錄 | Token 權限不足或 URL 打錯 | 確認 Actions 為 Read and write；URL 完整貼上 |
-| 出現 401 / Bad credentials | Token 錯或 Authorization 沒加 Bearer | 確認 `Bearer `+token 在同一行 |
-| 出現 404 | 倉庫名或 workflow 檔名錯 | 確認網址含 `justdoit518225-collab/fitbook-scraper` 與 `scrape-fitbook.yml` |
-| 出現 422 | JSON 錯 | 內文必須是 `{"ref":"main"}`，分支名為 `main` |
-| 「取得 URL 內容」失敗 | 沒網路 | 改用 Wi‑Fi 或關 VPN 再試 |
+1. https://github.com/settings/tokens  
+2. **Generate new token (classic)**  
+3. 勾選 **`repo`** → Generate  
+4. 複製 `ghp_` 開頭的 token  
+5. 在動作 2 貼成：`Bearer ghp_你的token`（同樣 Bearer 後有空格）
 
 ---
 
-### 替代方案：Classic Token（若找不到 fine-grained）
+### 注意
 
-1. https://github.com/settings/tokens → **Generate new token (classic)**
-2. 勾選 **`repo`**
-3. 產生後同樣做成 `Bearer ghp_xxxx...` 放進步驟 2 的文字
-
----
-
-### 注意事項
-
-- Token 外洩 = 別人可代你跑 workflow，**勿截圖分享捷徑內容**
-- 此捷徑只「觸發」GitHub Actions；**Cookie 過期**仍要到網頁 **Secrets** 更新 `FITBOOK_COOKIE`
-- 已有每小時 :50 自動跑，手動捷徑可當「我想馬上看最新資料」時使用
-- 不要連續狂按多次（會排很多個 workflow）
+- **勿**把含 Token 的捷徑截圖給別人  
+- 捷徑只**觸發** GitHub Actions；**Cookie** 仍要在 GitHub **Secrets** 維護  
+- 已有每小時 **:50** 自動跑；手動按鈕給「想立刻更新」時用  
+- 勿連續狂按（會排很多個 workflow）
 
 ---
 
