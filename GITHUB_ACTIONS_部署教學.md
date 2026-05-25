@@ -10,10 +10,11 @@
 | 項目 | 說明 |
 |------|------|
 | 排程 | 每小時 **第 50 分（台北時間）** 自動跑 |
+| 每週重設 | 每週一 **08:00（台北）** workflow **FitBook Weekly Reset**（`--reset-baseline`） |
 | 手動 | GitHub 網頁 / App → Actions → **Run workflow** |
 | 機密 | Cookie、服務帳戶 JSON 放在 **Secrets**，不進 Git |
 | 比對檔 | `last_scan_state.json` 用 Actions **Cache** 保留，供「掃描歷史」比對 |
-| 掃描歷史 | 僅記 **新增／刪除**（只比對**今天起**的場次，已過期不會誤判刪除）。重設初始版：`reset_scan_baseline.bat` |
+| 掃描歷史 | 僅記 **新增／刪除**（只比對**今天起**的場次，已過期不會誤判刪除）。重設初始版：`reset_scan_baseline.bat` 或每週一 08:00 自動重設 |
 
 ---
 
@@ -410,6 +411,24 @@ https://api.github.com/repos/justdoit518225-collab/fitbook-scraper/actions/workf
 
 ---
 
+## 每週一 08:00 自動重設（可選）
+
+雲端已內建 workflow **FitBook Weekly Reset**（`reset-scan-baseline.yml`）：
+
+- **時間：** 每週一 **08:00 台北時間**
+- **動作：** 等同 `python scrape_fitbook.py --reset-baseline`（清空掃描歷史、重建比對基準）
+- **手動：** Actions → **FitBook Weekly Reset** → Run workflow
+
+本機若要同時間重設（需電腦開機）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_windows_reset_task.ps1
+```
+
+取消：`uninstall_windows_reset_task.ps1`
+
+---
+
 ## 與本機排程並存？
 
 **不要** 同時開：
@@ -436,7 +455,8 @@ https://api.github.com/repos/justdoit518225-collab/fitbook-scraper/actions/workf
 
 | 檔案 | 用途 |
 |------|------|
-| `.github/workflows/scrape-fitbook.yml` | Actions 工作流程 |
+| `.github/workflows/scrape-fitbook.yml` | 每小時 :50 爬蟲 |
+| `.github/workflows/reset-scan-baseline.yml` | 每週一 08:00 重設比對基準 |
 | `config.github.json` | 非機密設定（可進 Git） |
 | `config.json` | 本機用，勿推送 |
 | `google_service_account.json` | 僅放 Secret，勿推送 |
