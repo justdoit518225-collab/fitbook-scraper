@@ -22,6 +22,19 @@ import pandas as pd
 from google.oauth2.service_account import Credentials
 
 HISTORY_SHEET_NAME = "掃描歷史"
+BASELINE_SHEET_NAME = "_scan_baseline"
+BASELINE_COLUMNS = [
+    "預約頁面",
+    "會員暱稱",
+    "頭像_url",
+    "場館標籤",
+    "場次日期",
+    "星期",
+    "時段",
+    "已報名人數",
+    "開放名額",
+    "剩餘名額",
+]
 OUTPUT_COLUMNS = [
     "掃描時間",
     "場館標籤",
@@ -497,6 +510,101 @@ def _write_history_sheet(
     )
 
 
+def open_spreadsheet(cfg: dict[str, Any]) -> Any:
+    """供主程式取得 spreadsheet 物件（共用同一連線執行基準讀寫）。"""
+    return _open_spreadsheet(cfg)
+
+
+def _hide_worksheet(sh: Any, ws: Any) -> None:
+    try:
+        sh.batch_update(
+            {
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": ws.id, "hidden": True},
+                            "fields": "hidden",
+                        }
+                    }
+                ]
+            }
+        )
+    except Exception:
+        pass
+
+
+def load_baseline_from_sheet(sh: Any) -> dict[str, dict[str, Any]]:
+    """從 _scan_baseline 分頁讀取基準。失敗回傳空字典（視為「沒有基準」）。"""
+    try:
+        ws = sh.worksheet(BASELINE_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        return {}
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    state: dict[str, dict[str, Any]] = {}
+    for r in rows[1:]:
+        rec = dict(zip(header, r))
+        url = (rec.get("預約頁面") or "").strip()
+        name = (rec.get("會員暱稱") or "").strip()
+        if not url or not name:
+            continue
+        entry = state.setdefault(
+            url,
+            {"members": [], "meta": {}, "member_avatars": {}},
+        )
+        entry["members"].append(name)
+        avatar = (rec.get("頭像_url") or "").strip()
+        if avatar:
+            entry["member_avatars"][name] = avatar
+        if not entry["meta"]:
+            for c in BASELINE_COLUMNS:
+                if c in ("預約頁面", "會員暱稱", "頭像_url"):
+                    continue
+                v = rec.get(c, "")
+                if v != "":
+                    entry["meta"][c] = v
+            entry["meta"]["預約頁面"] = url
+    return state
+
+
+def save_baseline_to_sheet(sh: Any, state: dict[str, dict[str, Any]]) -> None:
+    """完整覆寫 _scan_baseline 分頁（每位會員一列）。"""
+    ws = _ensure_worksheet(sh, BASELINE_SHEET_NAME, rows=4000, cols=len(BASELINE_COLUMNS))
+    ws.clear()
+    rows: list[list[Any]] = [list(BASELINE_COLUMNS)]
+    for url, entry in state.items():
+        if not isinstance(entry, dict):
+            continue
+        meta = entry.get("meta") or {}
+        avatars = entry.get("member_avatars") or {}
+        members = entry.get("members") or []
+        for name in members:
+            row = [url, str(name), str(avatars.get(name, "") or "")]
+            for c in BASELINE_COLUMNS:
+                if c in ("預約頁面", "會員暱稱", "頭像_url"):
+                    continue
+                row.append(_sanitize_cell_for_api(meta.get(c, "")))
+            rows.append(row)
+    end_c = len(BASELINE_COLUMNS)
+    end_r = len(rows)
+    ws.update(
+        f"A1:{_col_a1(end_c)}{end_r}",
+        rows,
+        value_input_option="USER_ENTERED",
+    )
+    _hide_worksheet(sh, ws)
+
+
+def clear_history_sheet(sh: Any) -> None:
+    """清空 掃描歷史 分頁，僅留標題列。"""
+    hw = _ensure_worksheet(sh, HISTORY_SHEET_NAME)
+    hw.clear()
+    header = _history_header_columns()
+    hw.update("A1", [header], value_input_option="USER_ENTERED")
+
+
 def write_google_sheets(
     df: pd.DataFrame,
     avatar_urls: list[str | None],
@@ -504,8 +612,9 @@ def write_google_sheets(
     *,
     history_append_df: pd.DataFrame | None = None,
     history_reset: bool = False,
+    spreadsheet: Any | None = None,
 ) -> str:
-    sh = _open_spreadsheet(cfg)
+    sh = spreadsheet if spreadsheet is not None else _open_spreadsheet(cfg)
 
     # --- sessions ---
     ws = _ensure_worksheet(sh, "sessions")

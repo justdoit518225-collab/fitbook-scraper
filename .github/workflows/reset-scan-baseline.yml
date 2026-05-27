@@ -1,4 +1,5 @@
-# 每週一 08:00（台北）重設比對基準並清空掃描歷史，再以當次掃描為初始版
+# 每週一 08:00（台北）清空掃描歷史並以當次掃描為新的比對基準
+# 基準存在試算表 _scan_baseline 分頁，不再使用 Actions Cache。
 
 name: FitBook Weekly Reset
 
@@ -31,28 +32,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore last scan state
-        uses: actions/cache/restore@v5
-        with:
-          path: last_scan_state.json
-          key: fitbook-last-scan-v2
-          restore-keys: |
-            fitbook-last-scan-
-
       - name: Prepare config and service account
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: python deploy/github_actions/prepare_ci.py
 
       - name: Run scraper (reset baseline)
-        id: scrape
         env:
           FITBOOK_COOKIE: ${{ secrets.FITBOOK_COOKIE }}
         run: python scrape_fitbook.py --reset-baseline
-
-      - name: Save last scan state
-        uses: actions/cache/save@v5
-        if: steps.scrape.outcome == 'success' && hashFiles('last_scan_state.json') != ''
-        with:
-          path: last_scan_state.json
-          key: fitbook-last-scan-v2

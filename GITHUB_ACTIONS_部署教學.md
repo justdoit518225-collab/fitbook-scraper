@@ -13,8 +13,9 @@
 | 每週重設 | 每週一 **08:00（台北）** workflow **FitBook Weekly Reset**（`--reset-baseline`） |
 | 手動 | GitHub 網頁 / App → Actions → **Run workflow** |
 | 機密 | Cookie、服務帳戶 JSON 放在 **Secrets**，不進 Git |
-| 比對檔 | `last_scan_state.json` 用 Actions **Cache** 保留，供「掃描歷史」比對 |
-| 掃描歷史 | 僅記 **新增／刪除**（只比對**今天起**的場次，已過期不會誤判刪除）。重設初始版：`reset_scan_baseline.bat` 或每週一 08:00 自動重設 |
+| 比對基準 | 存在試算表隱藏分頁 **`_scan_baseline`**（本機與雲端共用同一份；不再使用 Actions Cache） |
+| 掃描歷史 | 僅記 **新增／刪除**；解析失敗或異常時自動略過，不寫入也不更新基準 |
+| 每週一 08:00 | GitHub Actions **FitBook Weekly Reset** 自動清空歷史並重設基準 |
 
 ---
 
@@ -61,17 +62,20 @@ git push -u origin main
 ### 1. `FITBOOK_COOKIE`
 
 - **Name：** `FITBOOK_COOKIE`
-- **Value：** 瀏覽器登入 FitBook 後的 Cookie（至少含 `laravel_session=...`；建議整段 Cookie 貼上）
+- **Value：** 須同時含 **`XSRF-TOKEN`** 與 **`laravel_session`**
 
-取得方式（Chrome）：
+**建議：** 本機雙擊 **`export_fitbook_cookie.bat`** → 在跳出 Edge 登入 FitBook → 等待 120 秒 → 自動寫入 `config.json`。
 
-1. 登入 https://www.fit-book.com.tw  
-2. F12 → **Application** → **Cookies** → 選網域  
-3. 或 **Network** 任選請求 → **Request Headers** → 複製 `Cookie:` 整行（不要 `Cookie:` 前綴也可，程式會用環境變數整段當 header 值時需在 config 用 cookie_env）
+手動（Edge / Chrome）若找不到 Cookies：
+
+1. 登入 https://www.fit-book.com.tw/urlname459/564  
+2. F12 → **Network** → 重新整理 → 點任一 `fit-book.com.tw` 請求  
+3. **Headers** → **Request Headers** → 複製 **`cookie:`** 整段（要有 `XSRF-TOKEN` 與 `laravel_session`）  
+4. 貼到 GitHub Secret，以及 `config.json` 的 `cookie_header`
 
 程式會讀環境變數 `FITBOOK_COOKIE`（`config.github.json` 已設 `cookie_env`）。
 
-**重要：** Secret 必須是**一整行**（不可換行）。若出現 `InvalidHeader`，請 Update Secret：刪掉所有換行，不要貼 `Cookie:` 字樣。
+**重要：** 必須**一整行**、不要貼 `Cookie:` 字樣、不要換行。
 
 ### 2. `GOOGLE_SERVICE_ACCOUNT_JSON`
 

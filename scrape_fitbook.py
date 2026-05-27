@@ -5,10 +5,13 @@ FitBook：指定「球敘」場館之場次；僅寫入「已報名人數 > 0」
 會員：須登入 Cookie（cookie_header 或 FITBOOK_COOKIE），自課程頁解析「已預約會員」
 之暱稱與頭像網址；每位會員一列，頭像可為 Excel 內嵌圖或 Google 試算表 =IMAGE(url)。
 
-異動歷史：以「預約頁面」為場次、會員暱稱人次（含重複）與上次 last_scan_state.json 比對；
-若有異動，僅將「新增／刪除」列插入「掃描歷史」頂端（首次執行僅建立基準不附加）。
-比對僅含「場次日期 >= 今天」的場次，已過期活動不會誤判刪除。
-已寫入歷史的「掃描時間」不會再改；無異動時不碰掃描歷史分頁（含欄寬）。
+異動歷史（v2 設計）：
+- 比對基準存在試算表隱藏分頁 `_scan_baseline`（本機與雲端共用同一份基準）
+- 每週一 08:00 由 GitHub Actions `FitBook Weekly Reset` 清空歷史、重設基準
+- 一般掃描：與基準比對，僅將「新增／刪除」列插入「掃描歷史」最上方
+- 任一場解析失敗（Cookie/網路/網頁改版）→ 該次不寫歷史、不更新基準
+- 比對僅含「場次日期 >= 今天」場次；無有效基準時當作首次執行
+- 本機若無 Google Sheets，退回使用 last_scan_state.json
 
 輸出：若 config 設定 google_sheet_id 且服務帳戶 JSON 存在，寫入 Google 試算表；否則寫本機 Excel。
 """
@@ -1237,14 +1240,51 @@ def write_excel(
     return out
 
 
+def _load_baseline(cfg: dict[str, Any], sh: Any) -> dict[str, dict[str, Any]]:
+    from google_sheets_export import google_sheets_enabled, load_baseline_from_sheet
+
+    if google_sheets_enabled(cfg) and sh is not None:
+        return load_baseline_from_sheet(sh)
+    return load_last_scan_state()
+
+
+def _save_baseline(
+    cfg: dict[str, Any], sh: Any, state: dict[str, dict[str, Any]]
+) -> None:
+    from google_sheets_export import google_sheets_enabled, save_baseline_to_sheet
+
+    if google_sheets_enabled(cfg) and sh is not None:
+        save_baseline_to_sheet(sh, state)
+        if LAST_SCAN_STATE_PATH.is_file():
+            try:
+                LAST_SCAN_STATE_PATH.unlink()
+            except OSError:
+                pass
+    else:
+        save_last_scan_state(state)
+
+
+def _clear_history(cfg: dict[str, Any], sh: Any, out_path: Path) -> bool:
+    """清空 掃描歷史 分頁／工作表，僅保留標題列。回傳是否清空成功。"""
+    from google_sheets_export import (
+        clear_history_sheet,
+        google_sheets_enabled,
+    )
+
+    if google_sheets_enabled(cfg) and sh is not None:
+        clear_history_sheet(sh)
+        return True
+    return False
+
+
 def main() -> None:
-    from google_sheets_export import google_sheets_enabled, write_google_sheets
+    from google_sheets_export import google_sheets_enabled, open_spreadsheet, write_google_sheets
 
     parser = argparse.ArgumentParser(description="FitBook 場次爬蟲")
     parser.add_argument(
         "--reset-baseline",
         action="store_true",
-        help="清空比對基準與掃描歷史，本次掃描結果作為初始版（不寫入新增/刪除列）",
+        help="清空比對基準與掃描歷史，本次掃描結果作為新的基準（不寫入新增/刪除列）",
     )
     args = parser.parse_args()
 
@@ -1252,70 +1292,94 @@ def main() -> None:
     out = Path(__file__).resolve().parent / cfg["output_excel"]
     df, avatar_urls, session = run_once()
 
-    cols = list(df.columns) if not df.empty else list(OUTPUT_COLUMNS)
     history_cols = list(HISTORY_COLUMNS)
     current_state = session_state_from_dataframe(df, avatar_urls)
     tz = _scan_timezone(cfg)
     today = datetime.now(tz).date()
     current_state = filter_state_active_sessions(current_state, today)
+    placeholder_sessions = _count_placeholder_sessions(df)
+    sheets_on = google_sheets_enabled(cfg)
+    sh = open_spreadsheet(cfg) if sheets_on else None
+
+    history_append_df: pd.DataFrame | None = None
+    history_reset = False
+    info = ""
+    added_n = removed_n = 0
 
     if args.reset_baseline:
-        reset_scan_baseline()
-        had_previous = False
-        previous: dict[str, dict[str, Any]] = {}
-        baseline_reset = True
+        if placeholder_sessions > 0:
+            info = (
+                f"reset 終止：本次有 {placeholder_sessions} 個場次無法解析會員，"
+                f"請先確認 Cookie 與網路後重試"
+            )
+        else:
+            history_reset = True
+            _save_baseline(cfg, sh, current_state)
+            info = f"已重設比對基準，「{HISTORY_SHEET_NAME}」已清空"
     else:
-        baseline_reset = False
-        had_previous = LAST_SCAN_STATE_PATH.is_file()
-        previous = load_last_scan_state() if had_previous else {}
+        baseline = _load_baseline(cfg, sh)
+        baseline_compare = filter_state_active_sessions(baseline, today)
+        has_baseline = bool(baseline_compare)
 
-    appended = 0
-    added_n = removed_n = 0
-    history_append_df: pd.DataFrame | None = None
-    previous_compare = filter_state_active_sessions(previous, today)
-    placeholder_sessions = _count_placeholder_sessions(df)
-    skip_history_reason = ""
-    if placeholder_sessions > 0:
-        skip_history_reason = (
-            f"本次有 {placeholder_sessions} 個場次無法解析會員"
-            f"（Cookie/網路/網頁），略過掃描歷史且保留上次比對基準"
-        )
-
-    if (
-        had_previous
-        and not skip_history_reason
-        and snapshot_has_member_change(previous_compare, current_state)
-    ):
-        chunk = build_history_diff_chunk(
-            df,
-            previous,
-            current_state,
-            history_cols,
-            today=today,
-            avatar_urls=avatar_urls,
-        )
-        if not chunk.empty:
-            if "異動類型" in chunk.columns:
+        if placeholder_sessions > 0:
+            info = (
+                f"本次有 {placeholder_sessions} 個場次無法解析會員，"
+                f"略過掃描歷史與基準更新"
+            )
+        elif not has_baseline:
+            _save_baseline(cfg, sh, current_state)
+            info = "首次建立比對基準（無新增/刪除）"
+        elif snapshot_has_member_change(baseline_compare, current_state):
+            chunk = build_history_diff_chunk(
+                df,
+                baseline_compare,
+                current_state,
+                history_cols,
+                today=today,
+                avatar_urls=avatar_urls,
+            )
+            if not chunk.empty and "異動類型" in chunk.columns:
                 added_n = int((chunk["異動類型"] == "新增").sum())
                 removed_n = int((chunk["異動類型"] == "刪除").sum())
-                if removed_n >= 8 and removed_n > added_n:
-                    skip_history_reason = (
-                        f"異動異常（刪除 {removed_n}、新增 {added_n}），"
-                        f"疑似比對基準不同步或暫時讀取失敗，略過寫入掃描歷史"
+                total_curr = sum(
+                    len((v or {}).get("members") or [])
+                    for v in current_state.values()
+                )
+                total_prev = sum(
+                    len((v or {}).get("members") or [])
+                    for v in baseline_compare.values()
+                )
+                if (
+                    removed_n >= 8
+                    and removed_n > added_n
+                    and (total_prev == 0 or total_curr / max(total_prev, 1) < 0.5)
+                ):
+                    info = (
+                        f"異動異常（刪除 {removed_n}、新增 {added_n}，"
+                        f"目前/基準會員數 {total_curr}/{total_prev}），"
+                        f"略過寫入掃描歷史且不更新基準"
                     )
-                    chunk = pd.DataFrame(columns=history_cols)
-            if not chunk.empty:
-                appended = len(chunk)
-                history_append_df = _sort_dataframe_by_session_date(chunk)
+                else:
+                    history_append_df = _sort_dataframe_by_session_date(chunk)
+                    _save_baseline(cfg, sh, current_state)
+                    info = (
+                        f"人員異動 {len(chunk)} 列"
+                        f"（新增 {added_n}、刪除 {removed_n}）"
+                    )
+            else:
+                _save_baseline(cfg, sh, current_state)
+                info = "無有效異動，未追加歷史"
+        else:
+            info = "與基準無異動，未追加歷史"
 
-    history_reset = baseline_reset
-    if google_sheets_enabled(cfg):
+    if sheets_on:
         url = write_google_sheets(
             df,
             avatar_urls,
             cfg,
             history_append_df=history_append_df,
             history_reset=history_reset,
+            spreadsheet=sh,
         )
         path_msg = url
     else:
@@ -1330,30 +1394,7 @@ def main() -> None:
             )
         )
 
-    state_to_save = filter_state_active_sessions(current_state, today)
-    if skip_history_reason and not baseline_reset:
-        if had_previous and previous_compare:
-            save_last_scan_state(previous_compare)
-        else:
-            save_last_scan_state(state_to_save)
-    else:
-        save_last_scan_state(state_to_save)
-
-    msg = f"寫入: {path_msg}，目前筆數: {len(df)}"
-    if skip_history_reason:
-        msg += f"；{skip_history_reason}"
-    elif baseline_reset:
-        msg += f"；已重設比對基準（本次為初始版），「{HISTORY_SHEET_NAME}」已清空"
-    elif appended:
-        msg += (
-            f"；人員異動已附加至「{HISTORY_SHEET_NAME}」: {appended} 列"
-            f"（新增 {added_n}、刪除 {removed_n}）"
-        )
-    elif had_previous:
-        msg += f"；與上次比對無場次人員異動，未追加歷史"
-    else:
-        msg += f"；首次建立比對基準，未追加歷史"
-    print(msg)
+    print(f"寫入: {path_msg}，目前筆數: {len(df)}；{info}")
 
 
 if __name__ == "__main__":
