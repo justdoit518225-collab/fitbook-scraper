@@ -618,29 +618,37 @@ def write_google_sheets(
 
     # --- sessions ---
     ws = _ensure_worksheet(sh, "sessions")
-    ws.clear()
+    sheet_id = ws.id
     values = _df_to_values_with_images(df, avatar_urls)
+    num_rows = len(values)
+    num_cols = len(values[0]) if values else len(OUTPUT_COLUMNS)
+
+    # clear() 不會移除合併格；若先 update 再 unmerge，非左上角列的 A～H 會寫不進去而變空白。
+    pre_reqs: list[dict[str, Any]] = [
+        _clear_basic_filter(sheet_id),
+        _unmerge_sheet_grid(
+            sheet_id,
+            end_row=max(num_rows + 500, 2000),
+            end_col=max(num_cols + 5, 20),
+        ),
+    ]
+    sh.batch_update({"requests": pre_reqs})
+
+    ws.clear()
     if values:
         end_r = len(values)
         end_c = len(values[0])
         rng = f"A1:{_col_a1(end_c)}{end_r}"
         ws.update(rng, values, value_input_option="USER_ENTERED")
 
-    sheet_id = ws.id
-    num_rows = len(values)
-    num_cols = len(values[0]) if values else len(OUTPUT_COLUMNS)
-
-    reqs: list[dict[str, Any]] = [
-        _clear_basic_filter(sheet_id),
-        _unmerge_sheet_grid(sheet_id, end_row=max(num_rows + 500, 2000), end_col=max(num_cols + 5, 20))
-    ]
+    post_reqs: list[dict[str, Any]] = []
     if cfg.get("merge_session_cells", True):
-        reqs.extend(_merge_requests_for_sessions(df, sheet_id))
-    reqs.extend(_format_requests(sheet_id, max(num_rows, 1), num_cols))
-    reqs.extend(_column_width_requests(sheet_id, num_cols))
+        post_reqs.extend(_merge_requests_for_sessions(df, sheet_id))
+    post_reqs.extend(_format_requests(sheet_id, max(num_rows, 1), num_cols))
+    post_reqs.extend(_column_width_requests(sheet_id, num_cols))
 
-    if reqs:
-        sh.batch_update({"requests": reqs})
+    if post_reqs:
+        sh.batch_update({"requests": post_reqs})
 
     # --- 掃描歷史：僅插入新列，不 clear、不調欄寬 ---
     if history_reset or (
