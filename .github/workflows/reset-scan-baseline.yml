@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: last_scan_state.json
-          key: fitbook-last-scan-v1
+          key: fitbook-last-scan-v2
           restore-keys: |
             fitbook-last-scan-
 
@@ -55,4 +55,4 @@ jobs:
         if: steps.scrape.outcome == 'success' && hashFiles('last_scan_state.json') != ''
         with:
           path: last_scan_state.json
-          key: fitbook-last-scan-v1
+          key: fitbook-last-scan-v2

@@ -62,6 +62,8 @@ SESSION_META_COLUMNS = [
 ]
 
 SCAN_STATE_VERSION = 2
+# GitHub Actions cache 版本；變更時舊比對檔不會再被還原（避免誤判刪除）
+SCAN_STATE_CACHE_KEY = "fitbook-last-scan-v2"
 
 
 def load_config() -> dict[str, Any]:
@@ -96,6 +98,20 @@ def effective_cookie(cfg: dict[str, Any]) -> str:
     if env_name:
         return _normalize_cookie_header(os.environ.get(env_name) or "")
     return ""
+
+
+def apply_session_auth(session: requests.Session, cookie: str) -> None:
+    """設定 Cookie；若有 XSRF-TOKEN 一併帶入 Laravel 常用標頭。"""
+    if not cookie:
+        return
+    session.headers["Cookie"] = cookie
+    for part in cookie.split(";"):
+        part = part.strip()
+        if part.startswith("XSRF-TOKEN="):
+            from urllib.parse import unquote
+
+            session.headers["X-XSRF-TOKEN"] = unquote(part.split("=", 1)[1])
+            break
 
 
 def extract_json_after(html: str, needle: str) -> Any:
@@ -289,7 +305,11 @@ def fetch_member_course_html(
     place_id: int,
 ) -> str:
     url = f"{cfg['base_url']}/{cfg['store_path']}/member/course/{course_id}/{place_id}"
-    r = session.get(url, timeout=60)
+    headers = {
+        "Referer": f"{cfg['base_url']}{cfg.get('home_path') or ''}",
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    }
+    r = session.get(url, headers=headers, timeout=60)
     r.raise_for_status()
     r.encoding = r.apparent_encoding or "utf-8"
     return r.text
@@ -383,6 +403,34 @@ def _avatar_url_map_from_df(
     return m
 
 
+def _is_placeholder_member_name(name: str) -> bool:
+    """括號開頭為解析失敗說明，不可當真實會員比對。"""
+    return str(name or "").strip().startswith("（")
+
+
+def _members_list_from_group(grp: pd.DataFrame) -> list[str]:
+    out: list[str] = []
+    for n in grp["會員暱稱"].astype(str):
+        n = n.strip()
+        if n and not _is_placeholder_member_name(n):
+            out.append(n)
+    return out
+
+
+def _count_placeholder_sessions(df: pd.DataFrame) -> int:
+    """有報名但會員欄僅為錯誤說明文字的場次數。"""
+    if df.empty or "會員暱稱" not in df.columns or "預約頁面" not in df.columns:
+        return 0
+    n = 0
+    for _, grp in df.groupby("預約頁面", sort=False):
+        names = _members_list_from_group(grp)
+        if not names and any(
+            _is_placeholder_member_name(x) for x in grp["會員暱稱"].astype(str)
+        ):
+            n += 1
+    return n
+
+
 def _member_avatars_for_group(
     grp: pd.DataFrame, avatar_map: dict[tuple[str, str], str], url: str
 ) -> dict[str, str]:
@@ -412,7 +460,7 @@ def session_state_from_dataframe(
             if c in grp.columns:
                 meta[c] = _json_safe_value(first[c])
         out[str(url)] = {
-            "members": list(grp["會員暱稱"].astype(str)),
+            "members": _members_list_from_group(grp),
             "meta": meta,
             "member_avatars": _member_avatars_for_group(grp, avatar_map, str(url)),
         }
@@ -702,8 +750,7 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
             "Accept-Language": "zh-TW,zh;q=0.9",
         }
     )
-    if cookie:
-        session.headers["Cookie"] = cookie
+    apply_session_auth(session, cookie)
 
     html = fetch_home_html(cfg, session)
     templates = parse_course_templates(html)
@@ -747,13 +794,22 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
                     page_html = fetch_member_course_html(
                         cfg, session, int(c["id"]), int(cfg["place_id"])
                     )
-                    members = parse_members_with_avatars_from_html(
-                        page_html, teacher_name, extra_selectors
-                    )
+                    if _is_login_wall(page_html):
+                        name_note = (
+                            "（Cookie 可能已過期或未登入，課程頁被導向登入頁；"
+                            "請重新登入 FitBook 後更新 Cookie）"
+                        )
+                    else:
+                        members = parse_members_with_avatars_from_html(
+                            page_html, teacher_name, extra_selectors
+                        )
+                        if not members:
+                            name_note = (
+                                "（課程頁已登入但未解析到姓名，"
+                                "可能網頁改版；可調整 member_name_css_selectors）"
+                            )
                 except requests.RequestException:
                     name_note = "（課程頁請求失敗）"
-                if not members and not name_note:
-                    name_note = "（已帶 Cookie 但未解析到姓名，可能須調整 member_name_css_selectors）"
             elif rc_int > 0:
                 name_note = "（請在 config.json 設定 cookie_header 或環境變數 FITBOOK_COOKIE）"
 
@@ -1217,8 +1273,18 @@ def main() -> None:
     added_n = removed_n = 0
     history_append_df: pd.DataFrame | None = None
     previous_compare = filter_state_active_sessions(previous, today)
-    if had_previous and snapshot_has_member_change(
-        previous_compare, current_state
+    placeholder_sessions = _count_placeholder_sessions(df)
+    skip_history_reason = ""
+    if placeholder_sessions > 0:
+        skip_history_reason = (
+            f"本次有 {placeholder_sessions} 個場次無法解析會員"
+            f"（Cookie/網路/網頁），略過掃描歷史且保留上次比對基準"
+        )
+
+    if (
+        had_previous
+        and not skip_history_reason
+        and snapshot_has_member_change(previous_compare, current_state)
     ):
         chunk = build_history_diff_chunk(
             df,
@@ -1229,11 +1295,18 @@ def main() -> None:
             avatar_urls=avatar_urls,
         )
         if not chunk.empty:
-            appended = len(chunk)
             if "異動類型" in chunk.columns:
                 added_n = int((chunk["異動類型"] == "新增").sum())
                 removed_n = int((chunk["異動類型"] == "刪除").sum())
-            history_append_df = _sort_dataframe_by_session_date(chunk)
+                if removed_n >= 8 and removed_n > added_n:
+                    skip_history_reason = (
+                        f"異動異常（刪除 {removed_n}、新增 {added_n}），"
+                        f"疑似比對基準不同步或暫時讀取失敗，略過寫入掃描歷史"
+                    )
+                    chunk = pd.DataFrame(columns=history_cols)
+            if not chunk.empty:
+                appended = len(chunk)
+                history_append_df = _sort_dataframe_by_session_date(chunk)
 
     history_reset = baseline_reset
     if google_sheets_enabled(cfg):
@@ -1257,10 +1330,19 @@ def main() -> None:
             )
         )
 
-    save_last_scan_state(current_state)
+    state_to_save = filter_state_active_sessions(current_state, today)
+    if skip_history_reason and not baseline_reset:
+        if had_previous and previous_compare:
+            save_last_scan_state(previous_compare)
+        else:
+            save_last_scan_state(state_to_save)
+    else:
+        save_last_scan_state(state_to_save)
 
     msg = f"寫入: {path_msg}，目前筆數: {len(df)}"
-    if baseline_reset:
+    if skip_history_reason:
+        msg += f"；{skip_history_reason}"
+    elif baseline_reset:
         msg += f"；已重設比對基準（本次為初始版），「{HISTORY_SHEET_NAME}」已清空"
     elif appended:
         msg += (
