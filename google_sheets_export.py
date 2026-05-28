@@ -8,7 +8,7 @@ Google 試算表匯出（服務帳戶）。
 3. 新建或開啟一個試算表，網址列 id 為 .../d/<這段>/edit → 填入 config 的 google_sheet_id。
 4. 將試算表「共用」給 JSON 內 client_email（編輯者）。
 
-頭像欄使用 =IMAGE("url")，由試算表載入圖片（不需本機嵌入）。
+頭像欄（J）使用 =IMAGE("url")；頭像連結欄（L）寫入 URL 並以 API 套用可點擊超連結。
 """
 
 from __future__ import annotations
@@ -48,6 +48,9 @@ OUTPUT_COLUMNS = [
     "頭像",
     "預約頁面",
 ]
+
+# sessions 分頁 L 欄（OUTPUT_COLUMNS 之後）：擷取 J 欄 IMAGE 公式內的圖片 URL
+AVATAR_URL_COLUMN = "頭像連結"
 
 SESSION_MERGE_COLUMNS = [
     "掃描時間",
@@ -246,6 +249,63 @@ def _image_formula(url: str) -> str:
     return f'=IMAGE("{u}")'
 
 
+def _avatar_url_plain_cell(url: str | None) -> str:
+    """L 欄先寫入純 URL 文字，再由 batchUpdate 套上可點擊超連結。"""
+    return ("" if url is None else str(url)).strip()
+
+
+def _avatar_column_hyperlink_requests(
+    sheet_id: int,
+    avatar_urls: list[str | None],
+    *,
+    col_index: int = 11,
+    header_rows: int = 1,
+) -> list[dict[str, Any]]:
+    """L 欄套用 Sheets API 原生超連結（HYPERLINK 公式在試算表常無法點擊）。"""
+    if not avatar_urls:
+        return []
+    link_blue = {"red": 0.07, "green": 0.45, "blue": 0.82}
+    row_data: list[dict[str, Any]] = []
+    for raw in avatar_urls:
+        u = _avatar_url_plain_cell(raw)
+        if u:
+            row_data.append(
+                {
+                    "values": [
+                        {
+                            "userEnteredValue": {"stringValue": u},
+                            "userEnteredFormat": {
+                                "textFormat": {
+                                    "link": {"uri": u},
+                                    "foregroundColor": link_blue,
+                                    "underline": True,
+                                },
+                            },
+                        }
+                    ]
+                }
+            )
+        else:
+            row_data.append(
+                {"values": [{"userEnteredValue": {"stringValue": ""}}]}
+            )
+    return [
+        {
+            "updateCells": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": header_rows,
+                    "endRowIndex": header_rows + len(avatar_urls),
+                    "startColumnIndex": col_index,
+                    "endColumnIndex": col_index + 1,
+                },
+                "rows": row_data,
+                "fields": "userEnteredValue,userEnteredFormat.textFormat",
+            }
+        }
+    ]
+
+
 def _avatar_cell_value(val: Any) -> Any:
     """掃描歷史頭像欄：URL 轉 =IMAGE()，其餘照舊。"""
     s = str(val or "").strip()
@@ -262,7 +322,7 @@ def _df_to_values_with_images(
     df: pd.DataFrame, avatar_urls: list[str | None]
 ) -> list[list[Any]]:
     cols = [c for c in OUTPUT_COLUMNS if c in df.columns]
-    header = cols
+    header = cols + [AVATAR_URL_COLUMN]
     rows: list[list[Any]] = [header]
     if df.empty:
         return rows
@@ -279,6 +339,8 @@ def _df_to_values_with_images(
                     line.append("")
                 else:
                     line.append(v)
+        u = avatar_urls[i] if i < len(avatar_urls) else None
+        line.append(_avatar_url_plain_cell(u))
         rows.append(line)
     return rows
 
@@ -411,8 +473,8 @@ def _format_requests(
 
 
 def _column_width_requests(sheet_id: int, num_cols: int) -> list[dict[str, Any]]:
-    """像素寬度（約略）。"""
-    defaults = [140, 120, 100, 60, 110, 90, 90, 90, 160, 72, 280]
+    """像素寬度（約略）。L 欄頭像連結依試算表手動拉寬參考值 1324px。"""
+    defaults = [140, 120, 100, 60, 110, 90, 90, 90, 160, 72, 280, 1324]
     widths = (defaults + [120] * num_cols)[:num_cols]
     return [
         {
@@ -646,6 +708,10 @@ def write_google_sheets(
         post_reqs.extend(_merge_requests_for_sessions(df, sheet_id))
     post_reqs.extend(_format_requests(sheet_id, max(num_rows, 1), num_cols))
     post_reqs.extend(_column_width_requests(sheet_id, num_cols))
+    # 須在 format 之後，否則 repeatCell 會蓋掉 textFormat.link
+    post_reqs.extend(
+        _avatar_column_hyperlink_requests(sheet_id, avatar_urls, col_index=num_cols - 1)
+    )
 
     if post_reqs:
         sh.batch_update({"requests": post_reqs})
