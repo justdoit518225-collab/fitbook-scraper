@@ -419,7 +419,7 @@ https://api.github.com/repos/justdoit518225-collab/fitbook-scraper/actions/workf
 
 雲端已內建 workflow **FitBook Weekly Reset**（`reset-scan-baseline.yml`）：
 
-- **時間：** 每週一 **08:00 台北時間**
+- **時間：** 每週一 **08:00 台北時間**（workflow 以 `cron: 0 0 * * 1` UTC 對應，並設 `TZ=Asia/Taipei`；若曾變成下午才跑，多半是未套用台灣時區）
 - **動作：** 等同 `python scrape_fitbook.py --reset-baseline`（清空掃描歷史、重建比對基準）
 - **手動：** Actions → **FitBook Weekly Reset** → Run workflow
 

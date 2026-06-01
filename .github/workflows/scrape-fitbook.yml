@@ -5,8 +5,9 @@ name: FitBook Scrape
 
 on:
   schedule:
+    # 每小時第 50 分（台灣時間）
     - cron: "50 * * * *"
-      timezone: Asia/Taipei
+      timezone: "Asia/Taipei"
   workflow_dispatch:
 
 concurrency:
@@ -17,8 +18,15 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      TZ: Asia/Taipei
 
     steps:
+      - name: Log schedule time (Taipei)
+        run: |
+          echo "Workflow TZ=${TZ}"
+          date '+%Y-%m-%d %H:%M:%S %Z (%A)'
+
       - name: Checkout
         uses: actions/checkout@v5
 

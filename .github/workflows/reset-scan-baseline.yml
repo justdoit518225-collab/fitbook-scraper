@@ -5,8 +5,9 @@ name: FitBook Weekly Reset
 
 on:
   schedule:
-    - cron: "0 8 * * 1"
-      timezone: Asia/Taipei
+    # 週一 08:00 台灣時間（UTC+8，無夏令時間）＝ 週一 00:00 UTC
+    # 使用 UTC 排程，避免部分環境未套用 schedule.timezone 而變成 16:00 台北
+    - cron: "0 0 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -17,8 +18,15 @@ jobs:
   reset-baseline:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      TZ: Asia/Taipei
 
     steps:
+      - name: Log schedule time (Taipei)
+        run: |
+          echo "Workflow TZ=${TZ}"
+          date '+%Y-%m-%d %H:%M:%S %Z (%A)'
+
       - name: Checkout
         uses: actions/checkout@v5
 
