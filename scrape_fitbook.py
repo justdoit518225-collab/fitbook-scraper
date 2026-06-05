@@ -713,13 +713,17 @@ def _as_text_cell(x: Any) -> str:
 
 def _sort_dataframe_by_session_date(df: pd.DataFrame) -> pd.DataFrame:
     """以場次日期遞增排序（日期越接近今天越靠上）；無法解析者排最後。
-    次要排序：預約頁面、場館、時段、會員，使同一活動的列維持相鄰。
+    次要排序：預約頁面、場館、時段、報名順序（__member_order__），使同一活動的列維持相鄰。
     """
     if df.empty or "場次日期" not in df.columns:
         return df
     out = df.copy()
     out["_dt"] = pd.to_datetime(out["場次日期"], errors="coerce")
-    sub = ("預約頁面", "場館標籤", "時段", "會員暱稱")
+    sub: tuple[str, ...] = ("預約頁面", "場館標籤", "時段")
+    if "__member_order__" in out.columns:
+        sub = sub + ("__member_order__",)
+    elif "會員暱稱" in out.columns:
+        sub = sub + ("會員暱稱",)
     by = ["_dt"] + [c for c in sub if c in out.columns]
     out = out.sort_values(by=by, ascending=True, na_position="last").reset_index(
         drop=True
@@ -834,22 +838,29 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
             }
 
             if members:
-                for mname, murl in members:
+                for mi, (mname, murl) in enumerate(members):
                     r = dict(base_row)
                     r["會員暱稱"] = mname
                     r["頭像"] = ""
+                    r["__member_order__"] = mi
                     rows.append(r)
                     avatar_urls.append(murl)
             else:
                 r = dict(base_row)
                 r["會員暱稱"] = name_note
                 r["頭像"] = ""
+                r["__member_order__"] = 0
                 rows.append(r)
                 avatar_urls.append(None)
 
     df = pd.DataFrame(rows)
     if not df.empty:
+        member_order = (
+            df.pop("__member_order__") if "__member_order__" in df.columns else None
+        )
         df = df[[c for c in OUTPUT_COLUMNS if c in df.columns]]
+        if member_order is not None:
+            df["__member_order__"] = member_order.values
         n = len(df)
         if len(avatar_urls) == n and n:
             tmp_col = "__avatar_order__"
@@ -859,6 +870,8 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
             avatar_urls = ser.tolist()
         else:
             df = _sort_dataframe_by_session_date(df)
+        if "__member_order__" in df.columns:
+            df = df.drop(columns=["__member_order__"])
     return df, avatar_urls, session
 
 
