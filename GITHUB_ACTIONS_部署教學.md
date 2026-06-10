@@ -91,6 +91,17 @@ git push -u origin main
 
 正確做法：用記事本打開 `google_service_account.json` → 全選 → 複製 → 貼到 Secret 的 Value（可多行，沒關係）
 
+### 3. `TELEGRAM_BOT_TOKEN` 與 `TELEGRAM_CHAT_ID`（選用，人員異動通知）
+
+僅在掃描到**新增／刪除**且寫入「掃描歷史」時推送 Telegram。設定步驟見下方 **「Telegram 異動通知」** 章節。
+
+| Secret 名稱 | 內容 |
+|-------------|------|
+| `TELEGRAM_BOT_TOKEN` | BotFather 給的 token，例如 `7123456789:AAH...` |
+| `TELEGRAM_CHAT_ID` | 你的 chat id，例如 `123456789` 或群組 `-1001234567890` |
+
+本機可在 `config.json` 填 `telegram_bot_token`、`telegram_chat_id`（勿 commit）。
+
 ---
 
 ## 第四步：確認試算表設定
@@ -467,10 +478,72 @@ powershell -ExecutionPolicy Bypass -File .\install_windows_reset_task.ps1
 
 ---
 
+## Telegram 異動通知（選用）
+
+有人**新增或刪除**報名時，透過 Telegram Bot 推播（與寫入「掃描歷史」同一條件；無異動、Cookie 失效假刪除不會通知）。
+
+### 步驟一：建立 Bot
+
+1. 手機打開 **Telegram**，搜尋 **`@BotFather`**（官方，有藍勾）
+2. 傳送 **`/newbot`**
+3. 依指示輸入 Bot **顯示名稱**（例如 `FitBook 異動通知`）
+4. 再輸入 **username**（須以 `bot` 結尾，例如 `fitbook_apc_notify_bot`）
+5. BotFather 會回覆 **HTTP API Token**，形如：  
+   `7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`  
+   → 複製保存，這就是 **`telegram_bot_token`**
+
+### 步驟二：取得 Chat ID
+
+**個人私訊（建議）：**
+
+1. 搜尋你剛建立的 Bot（例如 `@fitbook_apc_notify_bot`），按 **Start** 或傳任意訊息（例如 `hi`）
+2. 電腦瀏覽器開啟（把 `TOKEN` 換成你的 token）：  
+   `https://api.telegram.org/botTOKEN/getUpdates`
+3. 在 JSON 裡找 **`"chat":{"id":123456789`** → 數字就是 **`telegram_chat_id`**（通常是正數）
+
+**若要發到群組：**
+
+1. 建立群組，把 Bot **加進群組**
+2. 在群組裡傳一則訊息
+3. 再開一次 `getUpdates`，找 **`"chat":{"id":-100xxxxxxxxxx`**（群組 id 常為負數）
+
+### 步驟三：寫入設定
+
+**本機**（`config.json`，勿 push）：
+
+```json
+"telegram_bot_token": "7123456789:AAH...",
+"telegram_chat_id": "123456789"
+```
+
+**GitHub Actions**（雲端定時掃描）：
+
+倉庫 **Settings → Secrets → Actions** 新增：
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+
+### 步驟四：測試
+
+1. 本機雙擊 **`FitBook_Run_Once.bat`**（或等下次有真實異動）
+2. 終端機若出現 **`已發送 Telegram 通知`** 即成功
+3. 若沒設定 token／chat id，程式會**靜默略過**，不影響爬蟲
+
+**手動測試 Bot 是否通：**（替換 token、chat_id）
+
+```text
+https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>&text=測試
+```
+
+瀏覽器應回 `"ok":true`，手機收到「測試」。
+
+---
+
 ## 快速檢查清單
 
 - [ ] 私人倉庫已建立並 push 程式  
 - [ ] Secrets：`FITBOOK_COOKIE`、`GOOGLE_SERVICE_ACCOUNT_JSON`  
+- [ ] （選用）Secrets：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`  
 - [ ] `config.github.json` 的 `google_sheet_id` 正確  
 - [ ] 試算表已共用給服務帳戶 email  
 - [ ] Actions 手動 Run 成功  

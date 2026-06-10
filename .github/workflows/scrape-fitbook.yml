@@ -48,4 +48,6 @@ jobs:
       - name: Run scraper
         env:
           FITBOOK_COOKIE: ${{ secrets.FITBOOK_COOKIE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scrape_fitbook.py

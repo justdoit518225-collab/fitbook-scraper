@@ -1407,7 +1407,22 @@ def main() -> None:
             )
         )
 
-    print(f"寫入: {path_msg}，目前筆數: {len(df)}；{info}")
+    tg_info = ""
+    if history_append_df is not None and not history_append_df.empty:
+        try:
+            from telegram_notify import maybe_send_telegram_diff
+
+            tg_result = maybe_send_telegram_diff(
+                cfg,
+                history_append_df,
+                sheet_url=path_msg if sheets_on else None,
+            )
+            if tg_result:
+                tg_info = f"；{tg_result}"
+        except Exception as e:
+            tg_info = f"；Telegram 通知失敗：{e}"
+
+    print(f"寫入: {path_msg}，目前筆數: {len(df)}；{info}{tg_info}")
 
 
 if __name__ == "__main__":

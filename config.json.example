@@ -8,6 +8,8 @@
   "google_service_account_json": "google_service_account.json",
   "cookie_header": "",
   "cookie_env": "FITBOOK_COOKIE",
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
   "timezone": "Asia/Taipei",
   "venues": [
     { "label": "中和自強國小", "match": ["自強國小", "中和自強"] },
