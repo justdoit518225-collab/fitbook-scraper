@@ -102,6 +102,17 @@ git push -u origin main
 
 本機可在 `config.json` 填 `telegram_bot_token`、`telegram_chat_id`（勿 commit）。
 
+### 4. `LINE_CHANNEL_ACCESS_TOKEN` 與 `LINE_USER_ID`（選用）
+
+掃描到**新增／刪除**時推送 LINE（與 Telegram 可並存，有設定的都會發）。
+
+| Secret 名稱 | 內容 |
+|-------------|------|
+| `LINE_CHANNEL_ACCESS_TOKEN` | Developers Console → Messaging API → Issue 的長期 Token |
+| `LINE_USER_ID` | 你的 `U...`（例如從官方帳號後台 Chats 網址取得） |
+
+本機 `config.json`：`line_channel_access_token`、`line_user_id`（勿 commit）。
+
 ---
 
 ## 第四步：確認試算表設定

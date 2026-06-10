@@ -1407,22 +1407,32 @@ def main() -> None:
             )
         )
 
-    tg_info = ""
+    notify_parts: list[str] = []
     if history_append_df is not None and not history_append_df.empty:
+        sheet_url = path_msg if sheets_on else None
         try:
             from telegram_notify import maybe_send_telegram_diff
 
             tg_result = maybe_send_telegram_diff(
-                cfg,
-                history_append_df,
-                sheet_url=path_msg if sheets_on else None,
+                cfg, history_append_df, sheet_url=sheet_url
             )
             if tg_result:
-                tg_info = f"；{tg_result}"
+                notify_parts.append(tg_result)
         except Exception as e:
-            tg_info = f"；Telegram 通知失敗：{e}"
+            notify_parts.append(f"Telegram 通知失敗：{e}")
+        try:
+            from line_notify import maybe_send_line_diff
 
-    print(f"寫入: {path_msg}，目前筆數: {len(df)}；{info}{tg_info}")
+            line_result = maybe_send_line_diff(
+                cfg, history_append_df, sheet_url=sheet_url
+            )
+            if line_result:
+                notify_parts.append(line_result)
+        except Exception as e:
+            notify_parts.append(f"LINE 通知失敗：{e}")
+
+    notify_info = f"；{'；'.join(notify_parts)}" if notify_parts else ""
+    print(f"寫入: {path_msg}，目前筆數: {len(df)}；{info}{notify_info}")
 
 
 if __name__ == "__main__":

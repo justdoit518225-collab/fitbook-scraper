@@ -10,6 +10,8 @@
   "cookie_env": "FITBOOK_COOKIE",
   "telegram_bot_token": "",
   "telegram_chat_id": "",
+  "line_channel_access_token": "",
+  "line_user_id": "",
   "timezone": "Asia/Taipei",
   "venues": [
     { "label": "中和自強國小", "match": ["自強國小", "中和自強"] },
