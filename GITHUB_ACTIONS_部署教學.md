@@ -9,7 +9,7 @@
 
 | 項目 | 說明 |
 |------|------|
-| 排程 | 每小時 **第 50 分（台北時間）** 自動跑 |
+| 排程 | 每 **10 分鐘（台北時間）** 自動跑（:00、:10、:20…） |
 | 每週重設 | 每週一 **08:00（台北）** workflow **FitBook Weekly Reset**（`--reset-baseline`） |
 | 手動 | GitHub 網頁 / App → Actions → **Run workflow** |
 | 機密 | Cookie、服務帳戶 JSON 放在 **Secrets**，不進 Git |
@@ -115,7 +115,7 @@ git push -u origin main
 - 綠勾 = 成功 → 手機打開 Google 試算表 `sessions` 分頁
 - 紅叉 = 失敗 → 點進該次 run 看 **Run scraper** 步驟的 log（不會顯示 Secret 內容）
 
-之後會 **每小時 :50（台北）** 自動跑。
+之後會 **每 10 分鐘（台北）** 自動跑。
 
 ---
 
@@ -389,7 +389,7 @@ https://api.github.com/repos/justdoit518225-collab/fitbook-scraper/actions/workf
 
 - **勿**把含 Token 的捷徑截圖給別人  
 - 捷徑只**觸發** GitHub Actions；**Cookie** 仍要在 GitHub **Secrets** 維護  
-- 已有每小時 **:50** 自動跑；手動按鈕給「想立刻更新」時用  
+- 已有每 **10 分鐘** 自動跑；手動按鈕給「想立刻更新」時用  
 - 勿連續狂按（會排很多個 workflow）
 
 ---
@@ -411,7 +411,7 @@ https://api.github.com/repos/justdoit518225-collab/fitbook-scraper/actions/workf
 | 私人 repo | 每月約 2000 分鐘 |
 | 公開 repo | 較寬鬆 |
 
-每次爬蟲約 1～3 分鐘，每小時 1 次 → 每月約 1500 分鐘內，**私人 repo 通常夠用**。
+每次爬蟲約 1～3 分鐘，每 10 分鐘 1 次 → 每月約 **4000～8000 分鐘**，**私人 repo 免費額度（約 2000 分/月）可能不夠**；可改 public repo、付費方案，或改回較低頻率。
 
 ---
 
@@ -459,7 +459,7 @@ powershell -ExecutionPolicy Bypass -File .\install_windows_reset_task.ps1
 
 | 檔案 | 用途 |
 |------|------|
-| `.github/workflows/scrape-fitbook.yml` | 每小時 :50 爬蟲 |
+| `.github/workflows/scrape-fitbook.yml` | 每 10 分鐘爬蟲 |
 | `.github/workflows/reset-scan-baseline.yml` | 每週一 08:00 重設比對基準 |
 | `config.github.json` | 非機密設定（可進 Git） |
 | `config.json` | 本機用，勿推送 |
