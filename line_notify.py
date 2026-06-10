@@ -12,7 +12,16 @@ import requests
 from telegram_notify import format_diff_message
 
 LINE_PUSH_API = "https://api.line.me/v2/bot/message/push"
+LINE_BROADCAST_API = "https://api.line.me/v2/bot/message/broadcast"
 MAX_MESSAGE_LEN = 5000
+
+
+def line_use_broadcast(cfg: dict[str, Any]) -> bool:
+    """廣播給所有好友，不需 line_user_id（適合僅自己一人加好友）。"""
+    if cfg.get("line_use_broadcast") is True:
+        return True
+    env = (os.environ.get("LINE_USE_BROADCAST") or "").strip().lower()
+    return env in ("1", "true", "yes")
 
 
 def effective_line_credentials(cfg: dict[str, Any]) -> tuple[str, str]:
@@ -28,20 +37,33 @@ def effective_line_credentials(cfg: dict[str, Any]) -> tuple[str, str]:
 
 def line_notify_enabled(cfg: dict[str, Any]) -> bool:
     token, user_id = effective_line_credentials(cfg)
-    return bool(token and user_id)
+    if not token:
+        return False
+    if line_use_broadcast(cfg):
+        return True
+    return bool(user_id)
+
+
+def _trim_line_text(text: str) -> str:
+    if len(text) > MAX_MESSAGE_LEN:
+        return text[: MAX_MESSAGE_LEN - 20].rstrip() + "\n…（訊息過長已截斷）"
+    return text
+
+
+def _line_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
 
 
 def send_line_message(token: str, user_id: str, text: str) -> None:
     if not text.strip():
         return
-    if len(text) > MAX_MESSAGE_LEN:
-        text = text[: MAX_MESSAGE_LEN - 20].rstrip() + "\n…（訊息過長已截斷）"
+    text = _trim_line_text(text)
     r = requests.post(
         LINE_PUSH_API,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers=_line_headers(token),
         json={
             "to": user_id,
             "messages": [{"type": "text", "text": text}],
@@ -53,18 +75,37 @@ def send_line_message(token: str, user_id: str, text: str) -> None:
         raise RuntimeError(f"LINE 發送失敗：{detail}")
 
 
+def send_line_broadcast(token: str, text: str) -> None:
+    if not text.strip():
+        return
+    text = _trim_line_text(text)
+    r = requests.post(
+        LINE_BROADCAST_API,
+        headers=_line_headers(token),
+        json={"messages": [{"type": "text", "text": text}]},
+        timeout=30,
+    )
+    if r.status_code != 200:
+        detail = r.text[:500] if r.text else r.status_code
+        raise RuntimeError(f"LINE 廣播失敗：{detail}")
+
+
 def maybe_send_line_diff(
     cfg: dict[str, Any],
     diff_df: pd.DataFrame | None,
     *,
     sheet_url: str | None = None,
 ) -> str | None:
-    """有異動且已設定 Token/User ID 時推送；未設定則略過。"""
+    """有異動且已設定 Token（廣播或 User ID 推播）時發送；未設定則略過。"""
     if diff_df is None or diff_df.empty:
         return None
     token, user_id = effective_line_credentials(cfg)
-    if not token or not user_id:
+    use_broadcast = line_use_broadcast(cfg)
+    if not token or (not use_broadcast and not user_id):
         return None
     text = format_diff_message(diff_df, sheet_url=sheet_url)
-    send_line_message(token, user_id, text)
+    if use_broadcast:
+        send_line_broadcast(token, text)
+    else:
+        send_line_message(token, user_id, text)
     return "已發送 LINE 通知"

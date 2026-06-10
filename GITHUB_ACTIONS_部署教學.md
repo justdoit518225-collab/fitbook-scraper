@@ -102,16 +102,19 @@ git push -u origin main
 
 本機可在 `config.json` 填 `telegram_bot_token`、`telegram_chat_id`（勿 commit）。
 
-### 4. `LINE_CHANNEL_ACCESS_TOKEN` 與 `LINE_USER_ID`（選用）
+### 4. `LINE_CHANNEL_ACCESS_TOKEN`（選用）
 
 掃描到**新增／刪除**時推送 LINE（與 Telegram 可並存，有設定的都會發）。
+
+本專案預設使用 **廣播模式**（`line_use_broadcast: true`）：通知會送給**所有加好友的人**，不需填 User ID。
 
 | Secret 名稱 | 內容 |
 |-------------|------|
 | `LINE_CHANNEL_ACCESS_TOKEN` | Developers Console → Messaging API → Issue 的長期 Token |
-| `LINE_USER_ID` | 你的 `U...`（例如從官方帳號後台 Chats 網址取得） |
 
-本機 `config.json`：`line_channel_access_token`、`line_user_id`（勿 commit）。
+本機 `config.json`：`line_channel_access_token`、`line_use_broadcast: true`（勿 commit）。
+
+若改為單人推播：設 `line_use_broadcast: false`，並填 `line_user_id`（`U` + 32 位 hex，可從 Webhook 或 Developers Console「Your user ID」取得）；GitHub 另加 Secret `LINE_USER_ID`。
 
 ---
 

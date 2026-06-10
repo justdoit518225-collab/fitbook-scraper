@@ -11,6 +11,7 @@
   "telegram_bot_token": "",
   "telegram_chat_id": "",
   "line_channel_access_token": "",
+  "line_use_broadcast": true,
   "line_user_id": "",
   "timezone": "Asia/Taipei",
   "venues": [
