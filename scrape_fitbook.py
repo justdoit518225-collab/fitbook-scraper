@@ -53,7 +53,7 @@ OUTPUT_COLUMNS = [
     "預約頁面",
 ]
 
-HISTORY_COLUMNS = ["掃描時間", "異動類型"] + [
+HISTORY_COLUMNS = ["掃描時間", "異動類型", "課程名稱"] + [
     c for c in OUTPUT_COLUMNS if c != "掃描時間"
 ]
 
@@ -62,7 +62,7 @@ SESSION_META_COLUMNS = [
     c
     for c in OUTPUT_COLUMNS
     if c not in ("會員暱稱", "頭像", "掃描時間")
-]
+] + ["課程名稱"]
 
 SCAN_STATE_VERSION = 2
 # GitHub Actions cache 版本；變更時舊比對檔不會再被還原（避免誤判刪除）
@@ -822,6 +822,7 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
 
             base_row = {
                 "掃描時間": scan_at,
+                "課程名稱": name.strip() or "",
                 "場館標籤": venue_label or "",
                 "場次日期": _as_text_cell(c.get("date_val")) or _as_text_cell(
                     c.get("date")
@@ -858,7 +859,10 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
         member_order = (
             df.pop("__member_order__") if "__member_order__" in df.columns else None
         )
-        df = df[[c for c in OUTPUT_COLUMNS if c in df.columns]]
+        keep_cols = [c for c in OUTPUT_COLUMNS if c in df.columns]
+        if "課程名稱" in df.columns:
+            keep_cols.append("課程名稱")
+        df = df[keep_cols]
         if member_order is not None:
             df["__member_order__"] = member_order.values
         n = len(df)
