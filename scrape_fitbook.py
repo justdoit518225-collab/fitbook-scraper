@@ -151,6 +151,19 @@ def parse_course_templates(html: str) -> list[dict[str, Any]]:
     return extract_json_after(html, "let courseTemplates = ")
 
 
+def course_name_without_venue(template_name: str, venue_label: str) -> str:
+    """模板名稱常含「課程(場館)」，拆出純課程名避免通知重複顯示場館。"""
+    name = (template_name or "").strip()
+    venue = (venue_label or "").strip()
+    if not name or not venue or name == venue:
+        return name
+    for open_p, close_p in (("(", ")"), ("（", "）")):
+        suffix = f"{open_p}{venue}{close_p}"
+        if name.endswith(suffix):
+            return name[: -len(suffix)].strip() or name
+    return name
+
+
 def template_matches_venue(
     name: str,
     venues: list[dict[str, Any]],
@@ -822,7 +835,7 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
 
             base_row = {
                 "掃描時間": scan_at,
-                "課程名稱": name.strip() or "",
+                "課程名稱": course_name_without_venue(name, venue_label),
                 "場館標籤": venue_label or "",
                 "場次日期": _as_text_cell(c.get("date_val")) or _as_text_cell(
                     c.get("date")

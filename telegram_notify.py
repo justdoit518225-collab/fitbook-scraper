@@ -77,12 +77,23 @@ def _format_quota(row: pd.Series) -> str:
     return ""
 
 
+def _norm_paren(s: str) -> str:
+    return s.replace("（", "(").replace("）", ")")
+
+
 def _course_title(row: pd.Series) -> str:
     course = str(row.get("課程名稱", "") or "").strip()
     venue = str(row.get("場館標籤", "") or "").strip()
-    if course and venue:
-        return f"{course}（{venue}）"
-    return course or venue or "未分類"
+    if not course and not venue:
+        return "未分類"
+    if not course:
+        return venue
+    if not venue or course == venue:
+        return course
+    cn, vn = _norm_paren(course), _norm_paren(venue)
+    if vn in cn or cn.endswith(f"({vn})"):
+        return course
+    return f"{course}（{venue}）"
 
 
 def _course_group_key(row: pd.Series) -> str:
