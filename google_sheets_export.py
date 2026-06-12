@@ -519,6 +519,35 @@ def _history_header_columns() -> list[str]:
     ]
 
 
+def _repair_history_sheet_layout(hw: Any) -> None:
+    """修正曾寫入「課程名稱」導致 C 欄後全欄錯位（D 欄起與標題不符）的舊資料。"""
+    expected = _history_header_columns()
+    ncol = len(expected)
+    existing = hw.get_all_values()
+    if not existing:
+        return
+    header = existing[0]
+    misaligned = header != expected or any(len(r) > ncol for r in existing[1:])
+    if not misaligned:
+        return
+    fixed: list[list[Any]] = []
+    for i, raw in enumerate(existing):
+        row = list(raw)
+        if i > 0 and len(row) > ncol:
+            # 多出的第 3 欄（原 D 欄視覺錯位）為「課程名稱」，刪除後 E→D 左移對齊標題
+            if len(row) >= 3:
+                row = row[:2] + row[3:]
+        fixed.append((row + [""] * ncol)[:ncol])
+    fixed[0] = expected
+    hw.clear()
+    if fixed:
+        hw.update(
+            f"A1:{_col_a1(ncol)}{len(fixed)}",
+            fixed,
+            value_input_option="USER_ENTERED",
+        )
+
+
 def _write_history_sheet(
     sh: Any,
     hw: Any,
@@ -538,7 +567,11 @@ def _write_history_sheet(
     if history_append_df is None or history_append_df.empty:
         return
 
-    plain = _df_to_plain_values(history_append_df)
+    _repair_history_sheet_layout(hw)
+
+    sheet_cols = _history_header_columns()
+    df_write = history_append_df.reindex(columns=sheet_cols)
+    plain = _df_to_plain_values(df_write)
     data_rows = plain[1:] if len(plain) > 1 else []
     if not data_rows:
         return

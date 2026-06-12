@@ -53,9 +53,11 @@ OUTPUT_COLUMNS = [
     "預約頁面",
 ]
 
-HISTORY_COLUMNS = ["掃描時間", "異動類型", "課程名稱"] + [
+HISTORY_SHEET_COLUMNS = ["掃描時間", "異動類型"] + [
     c for c in OUTPUT_COLUMNS if c != "掃描時間"
 ]
+# 通知用：含課程名稱；寫入「掃描歷史」試算表時不寫此欄（見 google_sheets_export）
+HISTORY_COLUMNS = HISTORY_SHEET_COLUMNS + ["課程名稱"]
 
 # 不含掃描時間：避免比對檔 meta 每次被覆寫，歷史列的掃描時間僅在寫入當下設定一次
 SESSION_META_COLUMNS = [
@@ -724,24 +726,42 @@ def _as_text_cell(x: Any) -> str:
     return str(x).strip()
 
 
+def _slot_start_minutes(slot: Any) -> int:
+    """從「19:30~21:30」等字串取開始時間（分鐘），供時段排序；無法解析排最後。"""
+    s = str(slot or "").replace("～", "~").replace("–", "-")
+    m = re.search(r"(\d{1,2}):(\d{2})", s)
+    if not m:
+        return 99_999
+    try:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    except (TypeError, ValueError):
+        return 99_999
+
+
 def _sort_dataframe_by_session_date(df: pd.DataFrame) -> pd.DataFrame:
     """以場次日期遞增排序（日期越接近今天越靠上）；無法解析者排最後。
-    次要排序：預約頁面、場館、時段、報名順序（__member_order__），使同一活動的列維持相鄰。
+    同日再依時段開始時間遞增（早的在上）；其後：預約頁面、場館、報名順序。
     """
     if df.empty or "場次日期" not in df.columns:
         return df
     out = df.copy()
     out["_dt"] = pd.to_datetime(out["場次日期"], errors="coerce")
-    sub: tuple[str, ...] = ("預約頁面", "場館標籤", "時段")
+    if "時段" in out.columns:
+        out["_slot"] = out["時段"].map(_slot_start_minutes)
+    sub: tuple[str, ...] = ("預約頁面", "場館標籤")
     if "__member_order__" in out.columns:
         sub = sub + ("__member_order__",)
     elif "會員暱稱" in out.columns:
         sub = sub + ("會員暱稱",)
-    by = ["_dt"] + [c for c in sub if c in out.columns]
+    by = ["_dt"]
+    if "_slot" in out.columns:
+        by.append("_slot")
+    by.extend(c for c in sub if c in out.columns)
     out = out.sort_values(by=by, ascending=True, na_position="last").reset_index(
         drop=True
     )
-    return out.drop(columns=["_dt"])
+    drop_cols = [c for c in ("_dt", "_slot") if c in out.columns]
+    return out.drop(columns=drop_cols)
 
 
 def reset_scan_baseline(*, clear_history: bool = True) -> None:
@@ -1233,7 +1253,7 @@ def write_excel(
     from openpyxl import Workbook, load_workbook
 
     out = Path(__file__).resolve().parent / cfg["output_excel"]
-    history_cols = list(HISTORY_COLUMNS)
+    history_sheet_cols = list(HISTORY_SHEET_COLUMNS)
     touch_history = history_reset or (
         history_append_df is not None and not history_append_df.empty
     )
@@ -1255,16 +1275,17 @@ def write_excel(
         if HISTORY_SHEET_NAME in wb.sheetnames:
             del wb[HISTORY_SHEET_NAME]
         hs = wb.create_sheet(HISTORY_SHEET_NAME)
-        for j, h in enumerate(history_cols, start=1):
+        for j, h in enumerate(history_sheet_cols, start=1):
             hs.cell(1, j, value=h)
     elif history_append_df is not None and not history_append_df.empty:
         if HISTORY_SHEET_NAME in wb.sheetnames:
             hs = wb[HISTORY_SHEET_NAME]
         else:
             hs = wb.create_sheet(HISTORY_SHEET_NAME)
-            for j, h in enumerate(history_cols, start=1):
+            for j, h in enumerate(history_sheet_cols, start=1):
                 hs.cell(1, j, value=h)
-        _append_history_rows_openpyxl(hs, history_append_df)
+        hist_df = history_append_df.reindex(columns=history_sheet_cols)
+        _append_history_rows_openpyxl(hs, hist_df)
 
     wb.save(out)
     return out

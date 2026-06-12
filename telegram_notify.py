@@ -102,11 +102,13 @@ def _course_group_key(row: pd.Series) -> str:
     return f"{course}\0{venue}"
 
 
-def _session_sort_key(row: pd.Series) -> tuple[str, str, str, str]:
+def _session_sort_key(row: pd.Series) -> tuple[Any, ...]:
+    from scrape_fitbook import _slot_start_minutes
+
     return (
         str(row.get("場次日期", "") or ""),
+        _slot_start_minutes(row.get("時段")),
         str(row.get("星期", "") or ""),
-        str(row.get("時段", "") or ""),
         str(row.get("預約頁面", "") or ""),
     )
 
