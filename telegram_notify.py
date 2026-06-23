@@ -184,26 +184,67 @@ def _session_when_text(row: pd.Series) -> str:
     return " ".join(x for x in (date, dow, slot) if x).strip() or "（場次未知）"
 
 
+def _avatar_href(url: str) -> str:
+    from google_sheets_export import parse_avatar_image_url
+
+    u = parse_avatar_image_url(url)
+    if not u:
+        return ""
+    return u.replace("&", "&amp;").replace('"', "&quot;")
+
+
+def _member_line_html(name: str, avatar: str) -> str:
+    """一人一行；有頭像 URL 時姓名可點開查看。"""
+    nm = _bold_html(name)
+    href = _avatar_href(avatar)
+    if href:
+        return f'   🧑 <a href="{href}">{nm}</a>'
+    return f"   🧑 {nm}"
+
+
+def _member_lines_plain(group: dict[str, Any]) -> list[str]:
+    member_rows: list[dict[str, str]] = list(group.get("member_rows") or [])
+    if not member_rows:
+        return [f"   {_format_members(group.get('members') or [])}"]
+    return [
+        f"   🧑 {item.get('name', '').strip()}"
+        for item in member_rows
+        if item.get("name")
+    ]
+
+
 def _format_session_line(group: dict[str, Any]) -> str:
     row: pd.Series = group["meta"]
     kind = str(group.get("kind", "") or "")
     when = _session_when_text(row)
-    members = _format_members(group.get("members") or [])
     quota = _format_quota(row)
-    return f"{_kind_icon(kind)} {when}　{members}{quota}"
+    return f"{_kind_icon(kind)} {when}{quota}"
+
+
+def _format_session_block_plain(group: dict[str, Any]) -> list[str]:
+    lines = [_format_session_line(group)]
+    lines.extend(_member_lines_plain(group))
+    return lines
 
 
 def _format_session_lines_html(group: dict[str, Any]) -> list[str]:
     row: pd.Series = group["meta"]
     kind = str(group.get("kind", "") or "")
     when = _escape_telegram_html(_session_when_text(row))
-    members = _format_members_html(group.get("members") or [])
     quota = _escape_telegram_html(_format_quota(row))
-    head = f"{_kind_icon(kind)} {when}"
-    clean = [n.strip() for n in (group.get("members") or []) if str(n or "").strip()]
-    if not clean:
-        return [f"{head}　{members}{quota}"]
-    return [head, f"   {members}{quota}"]
+    head = f"{_kind_icon(kind)} {when}{quota}"
+    member_rows: list[dict[str, str]] = list(group.get("member_rows") or [])
+    if not member_rows:
+        members = _format_members_html(group.get("members") or [])
+        if members:
+            return [head, f"   {members}"]
+        return [head]
+    lines = [head]
+    for item in member_rows:
+        name = str(item.get("name", "") or "").strip()
+        if name:
+            lines.append(_member_line_html(name, str(item.get("avatar", "") or "")))
+    return lines
 
 
 def _group_by_course(groups: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -259,7 +300,7 @@ def _format_diff_message_plain(
             if shown >= MAX_DETAIL_SESSIONS:
                 hidden += 1
                 continue
-            block.append(f"　{_format_session_line(group)}")
+            block.extend(_format_session_block_plain(group))
             shown += 1
         if block:
             lines.append(f"📘 {title}")
@@ -404,18 +445,7 @@ def maybe_send_telegram_diff(
     token, chat_id = effective_telegram_credentials(cfg)
     if not token or not chat_id:
         return None
-    text = format_diff_message(
-        diff_df,
-        sheet_url=sheet_url,
-        telegram_html=True,
-        max_len=MAX_PHOTO_CAPTION_LEN,
-    )
-    text_only = format_diff_message(
-        diff_df,
-        sheet_url=sheet_url,
-        telegram_html=True,
-    )
-    collage_enabled = cfg.get("telegram_collage_enabled", True)
+    collage_enabled = cfg.get("telegram_collage_enabled", False)
     photo_bytes: bytes | None = None
     if collage_enabled:
         try:
@@ -424,8 +454,14 @@ def maybe_send_telegram_diff(
             photo_bytes = build_diff_collage_png(diff_df, http_session=http_session)
         except Exception:
             photo_bytes = None
+    text = format_diff_message(
+        diff_df,
+        sheet_url=sheet_url,
+        telegram_html=True,
+        max_len=MAX_PHOTO_CAPTION_LEN if photo_bytes else None,
+    )
     if photo_bytes:
         send_telegram_photo(token, chat_id, photo_bytes, text, parse_mode="HTML")
         return "已發送 Telegram 通知（含頭像拼圖）"
-    send_telegram_message(token, chat_id, text_only, parse_mode="HTML")
+    send_telegram_message(token, chat_id, text, parse_mode="HTML")
     return "已發送 Telegram 通知"
