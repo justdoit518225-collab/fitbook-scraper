@@ -23,5 +23,8 @@
   "only_ball_you_name_contains": "球敘",
   "match_all_templates": true,
   "include_zero_reservation_sessions": false,
-  "merge_session_cells": true
+  "merge_session_cells": true,
+  "quick_scan_enabled": true,
+  "quick_scan_interval_minutes": 2,
+  "full_scan_every_quick_checks": 15
 }

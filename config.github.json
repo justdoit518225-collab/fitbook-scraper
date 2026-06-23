@@ -9,6 +9,9 @@
   "cookie_header": "",
   "cookie_env": "FITBOOK_COOKIE",
   "line_use_broadcast": true,
+  "quick_scan_enabled": true,
+  "quick_scan_interval_minutes": 2,
+  "full_scan_every_quick_checks": 15,
   "timezone": "Asia/Taipei",
   "venues": [
     { "label": "中和自強國小", "match": ["自強國小", "中和自強"] },

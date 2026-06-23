@@ -38,6 +38,7 @@ from bs4 import BeautifulSoup
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 LAST_SCAN_STATE_PATH = Path(__file__).resolve().parent / "last_scan_state.json"
+QUICK_SCAN_TICK_PATH = Path(__file__).resolve().parent / "quick_scan_tick.json"
 HISTORY_SHEET_NAME = "掃描歷史"
 OUTPUT_COLUMNS = [
     "掃描時間",
@@ -768,18 +769,77 @@ def reset_scan_baseline(*, clear_history: bool = True) -> None:
     """刪除比對檔，下次執行視為初始版（不追加掃描歷史）。clear_history 僅供呼叫端提示。"""
     if LAST_SCAN_STATE_PATH.is_file():
         LAST_SCAN_STATE_PATH.unlink()
+    if QUICK_SCAN_TICK_PATH.is_file():
+        try:
+            QUICK_SCAN_TICK_PATH.unlink()
+        except OSError:
+            pass
     _ = clear_history
 
 
-def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
-    cfg = load_config()
-    venues = cfg["venues"]
-    ball_kw = cfg.get("only_ball_you_name_contains") or ""
-    match_all_templates = bool(cfg.get("match_all_templates"))
-    include_zero_reservation = bool(cfg.get("include_zero_reservation_sessions"))
-    cookie = effective_cookie(cfg)
-    extra_selectors = cfg.get("member_name_css_selectors") or []
+def quick_scan_enabled(cfg: dict[str, Any]) -> bool:
+    if cfg.get("quick_scan_enabled") is True:
+        return True
+    if cfg.get("quick_scan_enabled") is False:
+        return False
+    env = (os.environ.get("QUICK_SCAN_ENABLED") or "").strip().lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    return bool(cfg.get("quick_scan_enabled"))
 
+
+def quick_scan_interval_minutes(cfg: dict[str, Any]) -> int:
+    try:
+        n = int(cfg.get("quick_scan_interval_minutes") or 2)
+    except (TypeError, ValueError):
+        n = 2
+    return max(1, min(n, 60))
+
+
+def _full_scan_every_quick_checks(cfg: dict[str, Any]) -> int:
+    try:
+        n = int(cfg.get("full_scan_every_quick_checks") or 15)
+    except (TypeError, ValueError):
+        n = 15
+    return max(0, n)
+
+
+def _load_quick_scan_tick() -> dict[str, Any]:
+    if not QUICK_SCAN_TICK_PATH.is_file():
+        return {"count": 0}
+    try:
+        raw = json.loads(QUICK_SCAN_TICK_PATH.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return raw
+    except (json.JSONDecodeError, OSError, TypeError):
+        pass
+    return {"count": 0}
+
+
+def _save_quick_scan_tick(data: dict[str, Any]) -> None:
+    QUICK_SCAN_TICK_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _should_force_periodic_full_scan(cfg: dict[str, Any]) -> bool:
+    """每 N 次快掃強制深度掃描一次，避免僅換人但人數相同時漏判。"""
+    every = _full_scan_every_quick_checks(cfg)
+    if every <= 0:
+        return False
+    tick = _load_quick_scan_tick()
+    count = int(tick.get("count") or 0) + 1
+    if count >= every:
+        _save_quick_scan_tick({"count": 0})
+        return True
+    _save_quick_scan_tick({"count": count})
+    return False
+
+
+def _make_http_session(cfg: dict[str, Any]) -> requests.Session:
     session = requests.Session()
     session.headers.update(
         {
@@ -790,33 +850,35 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
             "Accept-Language": "zh-TW,zh;q=0.9",
         }
     )
-    apply_session_auth(session, cookie)
+    apply_session_auth(session, effective_cookie(cfg))
+    return session
+
+
+def _iter_template_courses(
+    cfg: dict[str, Any],
+    session: requests.Session,
+    *,
+    today: date,
+) -> list[tuple[str, dict[str, Any]]]:
+    """回傳 (模板名稱, 課程 dict) 列表，篩選規則與 run_once 相同。"""
+    venues = cfg["venues"]
+    ball_kw = cfg.get("only_ball_you_name_contains") or ""
+    match_all_templates = bool(cfg.get("match_all_templates"))
+    include_zero_reservation = bool(cfg.get("include_zero_reservation_sessions"))
 
     html = fetch_home_html(cfg, session)
     templates = parse_course_templates(html)
-
-    rows: list[dict[str, Any]] = []
-    avatar_urls: list[str | None] = []
-    tz = _scan_timezone(cfg)
-    now_local = datetime.now(tz)
-    scan_at = now_local.strftime("%Y-%m-%d %H:%M:%S")
-    today = now_local.date()
-
+    out: list[tuple[str, dict[str, Any]]] = []
     for t in templates:
         name = t.get("name") or ""
         ok, venue_label = template_matches_venue(name, venues, ball_kw)
         if not ok and not match_all_templates:
             continue
-        if not venue_label:
-            venue_label = name.strip() or "未分類"
-
         tid = int(t["id"])
         data = fetch_template_courses(cfg, session, tid)
-
         for c in data.get("courses") or []:
-            rc = c.get("reservation_count")
             try:
-                rc_int = int(rc) if rc is not None else 0
+                rc_int = int(c.get("reservation_count") or 0)
             except (TypeError, ValueError):
                 rc_int = 0
             if rc_int <= 0 and not include_zero_reservation:
@@ -824,68 +886,181 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
             sdate = _parse_session_date_val(c.get("date_val"))
             if sdate is not None and sdate < today:
                 continue
+            out.append((str(name), c))
+    return out
 
-            teacher_name = c.get("teacher_name") or ""
-            members: list[tuple[str, str | None]] = []
-            name_note = ""
 
-            if rc_int > 0 and cookie:
-                try:
-                    page_html = fetch_member_course_html(
-                        cfg, session, int(c["id"]), int(cfg["place_id"])
+def fetch_light_session_counts(
+    cfg: dict[str, Any],
+    session: requests.Session | None = None,
+    *,
+    today: date | None = None,
+) -> dict[str, int]:
+    """僅透過首頁 + course_template API 取得各場次已報名人數（不抓會員頁）。"""
+    own_session = session is None
+    if own_session:
+        session = _make_http_session(cfg)
+    if today is None:
+        today = datetime.now(_scan_timezone(cfg)).date()
+    counts: dict[str, int] = {}
+    for _, c in _iter_template_courses(cfg, session, today=today):
+        url = (c.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            rc_int = int(c.get("reservation_count") or 0)
+        except (TypeError, ValueError):
+            rc_int = 0
+        counts[url] = rc_int
+    return counts
+
+
+def light_counts_changed_since_baseline(
+    baseline: dict[str, dict[str, Any]],
+    light_counts: dict[str, int],
+    today: date,
+) -> bool:
+    """比對 API 人數與基準會員數；任一場次不同即視為可能有異動。"""
+    baseline_active = filter_state_active_sessions(baseline, today)
+    urls = set(baseline_active) | set(light_counts)
+    for url in urls:
+        api_n = int(light_counts.get(url, 0))
+        entry = baseline_active.get(url, {})
+        if isinstance(entry, dict):
+            base_n = len(entry.get("members") or [])
+        else:
+            base_n = 0
+        if api_n != base_n:
+            return True
+    return False
+
+
+def run_quick_check(cfg: dict[str, Any]) -> tuple[bool, str]:
+    """執行快掃。回傳 (是否需要深度掃描, 說明)。"""
+    tz = _scan_timezone(cfg)
+    today = datetime.now(tz).date()
+    from google_sheets_export import google_sheets_enabled, open_spreadsheet
+
+    sheets_on = google_sheets_enabled(cfg)
+    sh = open_spreadsheet(cfg) if sheets_on else None
+    baseline = _load_baseline(cfg, sh)
+    baseline_compare = filter_state_active_sessions(baseline, today)
+
+    if _should_force_periodic_full_scan(cfg):
+        return True, "定期完整掃描（防漏同額換人）"
+
+    if not baseline_compare:
+        return True, "尚無比對基準，需完整掃描"
+
+    counts = fetch_light_session_counts(cfg, today=today)
+    if light_counts_changed_since_baseline(baseline_compare, counts, today):
+        changed = []
+        for url in set(baseline_compare) | set(counts):
+            api_n = int(counts.get(url, 0))
+            entry = baseline_compare.get(url, {})
+            base_n = len((entry.get("members") or []) if isinstance(entry, dict) else [])
+            if api_n != base_n:
+                changed.append(f"{base_n}→{api_n}")
+        hint = f"（{len(changed)} 場人數變動）" if changed else ""
+        return True, f"偵測到報名人數異動{hint}"
+
+    return False, "無報名人數異動"
+
+
+def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
+    cfg = load_config()
+    venues = cfg["venues"]
+    ball_kw = cfg.get("only_ball_you_name_contains") or ""
+    match_all_templates = bool(cfg.get("match_all_templates"))
+    cookie = effective_cookie(cfg)
+    extra_selectors = cfg.get("member_name_css_selectors") or []
+
+    session = _make_http_session(cfg)
+
+    tz = _scan_timezone(cfg)
+    now_local = datetime.now(tz)
+    scan_at = now_local.strftime("%Y-%m-%d %H:%M:%S")
+    today = now_local.date()
+
+    rows: list[dict[str, Any]] = []
+    avatar_urls: list[str | None] = []
+
+    for name, c in _iter_template_courses(cfg, session, today=today):
+        ok, venue_label = template_matches_venue(
+            name, venues, ball_kw
+        )
+        if not ok and not match_all_templates:
+            continue
+        if not venue_label:
+            venue_label = name.strip() or "未分類"
+
+        rc = c.get("reservation_count")
+        try:
+            rc_int = int(rc) if rc is not None else 0
+        except (TypeError, ValueError):
+            rc_int = 0
+
+        teacher_name = c.get("teacher_name") or ""
+        members: list[tuple[str, str | None]] = []
+        name_note = ""
+
+        if rc_int > 0 and cookie:
+            try:
+                page_html = fetch_member_course_html(
+                    cfg, session, int(c["id"]), int(cfg["place_id"])
+                )
+                if _is_login_wall(page_html):
+                    name_note = (
+                        "（Cookie 可能已過期或未登入，課程頁被導向登入頁；"
+                        "請重新登入 FitBook 後更新 Cookie）"
                     )
-                    if _is_login_wall(page_html):
+                else:
+                    members = parse_members_with_avatars_from_html(
+                        page_html, teacher_name, extra_selectors
+                    )
+                    if not members:
                         name_note = (
-                            "（Cookie 可能已過期或未登入，課程頁被導向登入頁；"
-                            "請重新登入 FitBook 後更新 Cookie）"
+                            "（課程頁已登入但未解析到姓名，"
+                            "可能網頁改版；可調整 member_name_css_selectors）"
                         )
-                    else:
-                        members = parse_members_with_avatars_from_html(
-                            page_html, teacher_name, extra_selectors
-                        )
-                        if not members:
-                            name_note = (
-                                "（課程頁已登入但未解析到姓名，"
-                                "可能網頁改版；可調整 member_name_css_selectors）"
-                            )
-                except requests.RequestException:
-                    name_note = "（課程頁請求失敗）"
-            elif rc_int > 0:
-                name_note = "（請在 config.json 設定 cookie_header 或環境變數 FITBOOK_COOKIE）"
+            except requests.RequestException:
+                name_note = "（課程頁請求失敗）"
+        elif rc_int > 0:
+            name_note = "（請在 config.json 設定 cookie_header 或環境變數 FITBOOK_COOKIE）"
 
-            base_row = {
-                "掃描時間": scan_at,
-                "課程名稱": course_name_without_venue(name, venue_label),
-                "場館標籤": venue_label or "",
-                "場次日期": _as_text_cell(c.get("date_val")) or _as_text_cell(
-                    c.get("date")
-                ),
-                "星期": _as_text_cell(c.get("day_of_week_val"))
-                or _as_text_cell(c.get("day_of_week")),
-                "時段": _as_text_cell(c.get("show_time")) or _as_text_cell(
-                    c.get("time")
-                ),
-                "已報名人數": int(rc_int),
-                "開放名額": _coerce_nonneg_int(c.get("order_count")),
-                "剩餘名額": _coerce_nonneg_int(c.get("remain_count")),
-                "預約頁面": (c.get("url") or "").strip(),
-            }
+        base_row = {
+            "掃描時間": scan_at,
+            "課程名稱": course_name_without_venue(name, venue_label),
+            "場館標籤": venue_label or "",
+            "場次日期": _as_text_cell(c.get("date_val")) or _as_text_cell(
+                c.get("date")
+            ),
+            "星期": _as_text_cell(c.get("day_of_week_val"))
+            or _as_text_cell(c.get("day_of_week")),
+            "時段": _as_text_cell(c.get("show_time")) or _as_text_cell(
+                c.get("time")
+            ),
+            "已報名人數": int(rc_int),
+            "開放名額": _coerce_nonneg_int(c.get("order_count")),
+            "剩餘名額": _coerce_nonneg_int(c.get("remain_count")),
+            "預約頁面": (c.get("url") or "").strip(),
+        }
 
-            if members:
-                for mi, (mname, murl) in enumerate(members):
-                    r = dict(base_row)
-                    r["會員暱稱"] = mname
-                    r["頭像"] = ""
-                    r["__member_order__"] = mi
-                    rows.append(r)
-                    avatar_urls.append(murl)
-            else:
+        if members:
+            for mi, (mname, murl) in enumerate(members):
                 r = dict(base_row)
-                r["會員暱稱"] = name_note
+                r["會員暱稱"] = mname
                 r["頭像"] = ""
-                r["__member_order__"] = 0
+                r["__member_order__"] = mi
                 rows.append(r)
-                avatar_urls.append(None)
+                avatar_urls.append(murl)
+        else:
+            r = dict(base_row)
+            r["會員暱稱"] = name_note
+            r["頭像"] = ""
+            r["__member_order__"] = 0
+            rows.append(r)
+            avatar_urls.append(None)
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -1337,9 +1512,38 @@ def main() -> None:
         action="store_true",
         help="清空比對基準與掃描歷史，本次掃描結果作為新的基準（不寫入新增/刪除列）",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="略過快掃，強制完整掃描（抓會員頁）",
+    )
+    parser.add_argument(
+        "--quick-only",
+        action="store_true",
+        help="僅執行快掃並結束（測試用）",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
+
+    if args.quick_only:
+        need_deep, reason = run_quick_check(cfg)
+        print(
+            f"快掃：{reason}（{'需深度掃描' if need_deep else '略過深度掃描'}）"
+        )
+        return
+
+    if (
+        not args.reset_baseline
+        and not args.full
+        and quick_scan_enabled(cfg)
+    ):
+        need_deep, reason = run_quick_check(cfg)
+        if not need_deep:
+            print(f"快掃：{reason}，略過深度掃描")
+            return
+        print(f"快掃：{reason}，啟動深度掃描")
+
     out = Path(__file__).resolve().parent / cfg["output_excel"]
     df, avatar_urls, session = run_once()
 
