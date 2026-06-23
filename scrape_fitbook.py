@@ -1656,7 +1656,10 @@ def main() -> None:
             from telegram_notify import maybe_send_telegram_diff
 
             tg_result = maybe_send_telegram_diff(
-                cfg, history_append_df, sheet_url=sheet_url
+                cfg,
+                history_append_df,
+                sheet_url=sheet_url,
+                http_session=session,
             )
             if tg_result:
                 notify_parts.append(tg_result)

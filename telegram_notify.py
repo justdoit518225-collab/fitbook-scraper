@@ -12,8 +12,11 @@ import pandas as pd
 import requests
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_PHOTO_API = "https://api.telegram.org/bot{token}/sendPhoto"
 MAX_MESSAGE_LEN = 4000
+MAX_PHOTO_CAPTION_LEN = 1020
 MAX_DETAIL_SESSIONS = 12
+MAX_COLLAGE_SESSIONS = 8
 _LINE_SEP = "────────────────"
 
 
@@ -152,6 +155,10 @@ def _collect_session_groups(diff_df: pd.DataFrame) -> list[dict[str, Any]]:
         member = str(row.get("會員暱稱", "") or "").strip()
         if member:
             buckets[key]["members"].append(member)
+            avatar = str(row.get("頭像", "") or "").strip()
+            buckets[key].setdefault("member_rows", []).append(
+                {"name": member, "avatar": avatar}
+            )
     return [buckets[k] for k in order]
 
 
@@ -328,6 +335,7 @@ def format_diff_message(
     *,
     sheet_url: str | None = None,
     telegram_html: bool = False,
+    max_len: int | None = None,
 ) -> str:
     if diff_df.empty:
         return ""
@@ -335,8 +343,9 @@ def format_diff_message(
         text = _format_diff_message_telegram_html(diff_df, sheet_url=sheet_url)
     else:
         text = _format_diff_message_plain(diff_df, sheet_url=sheet_url)
-    if len(text) > MAX_MESSAGE_LEN:
-        text = text[: MAX_MESSAGE_LEN - 20].rstrip() + "\n…（訊息過長已截斷）"
+    limit = max_len if max_len is not None else MAX_MESSAGE_LEN
+    if len(text) > limit:
+        text = text[: limit - 20].rstrip() + "\n…（訊息過長已截斷）"
     return text
 
 
@@ -359,11 +368,35 @@ def send_telegram_message(
         raise RuntimeError(f"Telegram 發送失敗：{detail}")
 
 
+def send_telegram_photo(
+    token: str,
+    chat_id: str,
+    photo_bytes: bytes,
+    caption: str,
+    *,
+    parse_mode: str | None = None,
+) -> None:
+    if not photo_bytes:
+        return
+    url = TELEGRAM_PHOTO_API.format(token=token)
+    data: dict[str, Any] = {"chat_id": chat_id}
+    if caption.strip():
+        data["caption"] = caption
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    files = {"photo": ("fitbook_diff.png", photo_bytes, "image/png")}
+    r = requests.post(url, data=data, files=files, timeout=60)
+    if r.status_code != 200:
+        detail = r.text[:500] if r.text else r.status_code
+        raise RuntimeError(f"Telegram 圖片發送失敗：{detail}")
+
+
 def maybe_send_telegram_diff(
     cfg: dict[str, Any],
     diff_df: pd.DataFrame | None,
     *,
     sheet_url: str | None = None,
+    http_session: requests.Session | None = None,
 ) -> str | None:
     """有異動且已設定 Token/Chat ID 時推送；未設定則略過。回傳結果說明或 None。"""
     if diff_df is None or diff_df.empty:
@@ -371,6 +404,28 @@ def maybe_send_telegram_diff(
     token, chat_id = effective_telegram_credentials(cfg)
     if not token or not chat_id:
         return None
-    text = format_diff_message(diff_df, sheet_url=sheet_url, telegram_html=True)
-    send_telegram_message(token, chat_id, text, parse_mode="HTML")
+    text = format_diff_message(
+        diff_df,
+        sheet_url=sheet_url,
+        telegram_html=True,
+        max_len=MAX_PHOTO_CAPTION_LEN,
+    )
+    text_only = format_diff_message(
+        diff_df,
+        sheet_url=sheet_url,
+        telegram_html=True,
+    )
+    collage_enabled = cfg.get("telegram_collage_enabled", True)
+    photo_bytes: bytes | None = None
+    if collage_enabled:
+        try:
+            from telegram_collage import build_diff_collage_png
+
+            photo_bytes = build_diff_collage_png(diff_df, http_session=http_session)
+        except Exception:
+            photo_bytes = None
+    if photo_bytes:
+        send_telegram_photo(token, chat_id, photo_bytes, text, parse_mode="HTML")
+        return "已發送 Telegram 通知（含頭像拼圖）"
+    send_telegram_message(token, chat_id, text_only, parse_mode="HTML")
     return "已發送 Telegram 通知"

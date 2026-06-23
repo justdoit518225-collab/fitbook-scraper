@@ -9,3 +9,4 @@ google_service_account.json
 *-service-account*.json
 .env
 config.json
+.run_pythonw_path.txt
