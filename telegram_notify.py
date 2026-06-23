@@ -187,10 +187,20 @@ def _group_by_course(groups: list[dict[str, Any]]) -> list[tuple[str, list[dict[
     return out
 
 
+def _escape_telegram_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _telegram_sheet_link(sheet_url: str) -> str:
+    href = sheet_url.strip().replace("&", "&amp;").replace('"', "&quot;")
+    return f'<a href="{href}">📎 開啟試算表</a>'
+
+
 def format_diff_message(
     diff_df: pd.DataFrame,
     *,
     sheet_url: str | None = None,
+    telegram_html: bool = False,
 ) -> str:
     if diff_df.empty:
         return ""
@@ -232,28 +242,38 @@ def format_diff_message(
             ]
         )
 
+    link_suffix = ""
     if sheet_url:
-        lines.extend([_LINE_SEP, "📎 試算表", sheet_url.strip()])
+        if telegram_html:
+            link_suffix = f"\n{_LINE_SEP}\n{_telegram_sheet_link(sheet_url)}"
+        else:
+            lines.extend([_LINE_SEP, "📎 試算表", sheet_url.strip()])
 
-    text = "\n".join(lines).strip()
+    if telegram_html:
+        text = "\n".join(_escape_telegram_html(line) for line in lines).strip()
+        if link_suffix:
+            text += link_suffix
+    else:
+        text = "\n".join(lines).strip()
     if len(text) > MAX_MESSAGE_LEN:
         text = text[: MAX_MESSAGE_LEN - 20].rstrip() + "\n…（訊息過長已截斷）"
     return text
 
 
-def send_telegram_message(token: str, chat_id: str, text: str) -> None:
+def send_telegram_message(
+    token: str, chat_id: str, text: str, *, parse_mode: str | None = None
+) -> None:
     if not text.strip():
         return
     url = TELEGRAM_API.format(token=token)
-    r = requests.post(
-        url,
-        json={
-            "chat_id": chat_id,
-            "text": text,
-            "disable_web_page_preview": True,
-        },
-        timeout=30,
-    )
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    r = requests.post(url, json=payload, timeout=30)
     if r.status_code != 200:
         detail = r.text[:500] if r.text else r.status_code
         raise RuntimeError(f"Telegram 發送失敗：{detail}")
@@ -271,6 +291,6 @@ def maybe_send_telegram_diff(
     token, chat_id = effective_telegram_credentials(cfg)
     if not token or not chat_id:
         return None
-    text = format_diff_message(diff_df, sheet_url=sheet_url)
-    send_telegram_message(token, chat_id, text)
+    text = format_diff_message(diff_df, sheet_url=sheet_url, telegram_html=True)
+    send_telegram_message(token, chat_id, text, parse_mode="HTML")
     return "已發送 Telegram 通知"
