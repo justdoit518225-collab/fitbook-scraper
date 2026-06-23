@@ -255,6 +255,116 @@ def _avatar_url_plain_cell(url: str | None) -> str:
     return ("" if url is None else str(url)).strip()
 
 
+def parse_avatar_image_url(cell: Any) -> str:
+    """從 =IMAGE(\"url\") 或純 URL 字串取出圖片網址。"""
+    s = str(cell or "").strip()
+    if not s:
+        return ""
+    m = re.match(r'^=IMAGE\s*\(\s*"((?:[^"]|"")*)"\s*\)', s, re.I)
+    if m:
+        return m.group(1).replace('""', '"').strip()
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    return ""
+
+
+def baseline_member_avatar_map(
+    state: dict[str, dict[str, Any]],
+) -> dict[tuple[str, str], str]:
+    """基準狀態 → (預約頁面, 會員暱稱) → 頭像 URL（刪除異動還原用）。"""
+    out: dict[tuple[str, str], str] = {}
+    for url, entry in (state or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        avatars = entry.get("member_avatars") or {}
+        if not isinstance(avatars, dict):
+            continue
+        page = str(url).strip()
+        for name, raw in avatars.items():
+            u = str(raw or "").strip()
+            n = str(name or "").strip()
+            if page and n and u:
+                out[(page, n)] = u
+    return out
+
+
+def load_sessions_avatar_map(sh: Any) -> dict[tuple[str, str], str]:
+    """讀取 sessions 分頁 L 欄（頭像連結）；L 空時改解析 J 欄 =IMAGE()。"""
+    try:
+        ws = sh.worksheet("sessions")
+    except Exception:
+        return {}
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        return {}
+    header = [str(h).strip() for h in rows[0]]
+    try:
+        i_page = header.index("預約頁面")
+        i_name = header.index("會員暱稱")
+        i_link = header.index(AVATAR_URL_COLUMN)
+    except ValueError:
+        return {}
+    i_image = header.index("頭像") if "頭像" in header else -1
+    out: dict[tuple[str, str], str] = {}
+    for r in rows[1:]:
+        def _cell(i: int) -> str:
+            if i < 0 or i >= len(r):
+                return ""
+            return str(r[i] or "").strip()
+
+        page, name = _cell(i_page), _cell(i_name)
+        if not page or not name:
+            continue
+        url = parse_avatar_image_url(_cell(i_link))
+        if not url and i_image >= 0:
+            url = parse_avatar_image_url(_cell(i_image))
+        if url:
+            out[(page, name)] = url
+    return out
+
+
+def enrich_diff_df_avatars(
+    diff_df: pd.DataFrame,
+    *,
+    sessions_map: dict[tuple[str, str], str],
+    baseline_avatar_map: dict[tuple[str, str], str] | None = None,
+    scrape_map: dict[tuple[str, str], str] | None = None,
+) -> pd.DataFrame:
+    """以 sessions L 欄 URL 補齊異動列頭像（與試算表顯示一致）。"""
+    if diff_df is None or diff_df.empty:
+        return diff_df
+    out = diff_df.copy()
+    if "頭像" not in out.columns:
+        out["頭像"] = ""
+    baseline_avatar_map = baseline_avatar_map or {}
+    scrape_map = scrape_map or {}
+    for idx, row in out.iterrows():
+        page = str(row.get("預約頁面", "") or "").strip()
+        name = str(row.get("會員暱稱", "") or "").strip()
+        kind = str(row.get("異動類型", "") or "").strip()
+        if not page or not name:
+            continue
+        key = (page, name)
+        url = parse_avatar_image_url(row.get("頭像", ""))
+        if kind == "刪除":
+            url = (
+                url
+                or baseline_avatar_map.get(key, "")
+                or sessions_map.get(key, "")
+                or scrape_map.get(key, "")
+            )
+        else:
+            url = (
+                url
+                or sessions_map.get(key, "")
+                or scrape_map.get(key, "")
+                or baseline_avatar_map.get(key, "")
+            )
+        if url:
+            out.at[idx, "頭像"] = url
+    return out
+
+
 def _avatar_column_hyperlink_requests(
     sheet_id: int,
     avatar_urls: list[str | None],

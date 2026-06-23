@@ -52,16 +52,33 @@ def _load_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | Ima
     return ImageFont.load_default()
 
 
+def _normalize_avatar_url(url: str) -> str:
+    from google_sheets_export import parse_avatar_image_url
+
+    return parse_avatar_image_url(url)
+
+
 def _fetch_avatar_bytes(http_session: requests.Session | None, url: str) -> bytes | None:
+    url = _normalize_avatar_url(url)
     if not url:
         return None
+    try:
+        r = requests.get(
+            url,
+            timeout=25,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; FitBookBot/1.0)"},
+        )
+        r.raise_for_status()
+        if len(r.content) > 100 and len(r.content) <= 2_500_000:
+            return r.content
+    except requests.RequestException:
+        pass
     try:
         from scrape_fitbook import _download_avatar_image
 
         if http_session is not None:
             return _download_avatar_image(http_session, url)
-        s = requests.Session()
-        return _download_avatar_image(s, url)
+        return _download_avatar_image(requests.Session(), url)
     except Exception:
         return None
 

@@ -1557,6 +1557,7 @@ def main() -> None:
     sh = open_spreadsheet(cfg) if sheets_on else None
 
     history_append_df: pd.DataFrame | None = None
+    prev_baseline_avatar_map: dict[tuple[str, str], str] = {}
     history_reset = False
     info = ""
     added_n = removed_n = 0
@@ -1616,6 +1617,11 @@ def main() -> None:
                     )
                 else:
                     history_append_df = _sort_dataframe_by_session_date(chunk)
+                    from google_sheets_export import baseline_member_avatar_map
+
+                    prev_baseline_avatar_map = baseline_member_avatar_map(
+                        baseline_compare
+                    )
                     _save_baseline(cfg, sh, current_state)
                     info = (
                         f"人員異動 {len(chunk)} 列"
@@ -1652,12 +1658,30 @@ def main() -> None:
     notify_parts: list[str] = []
     if history_append_df is not None and not history_append_df.empty:
         sheet_url = path_msg if sheets_on else None
+        notify_diff_df = history_append_df
+        try:
+            from google_sheets_export import enrich_diff_df_avatars, load_sessions_avatar_map
+
+            scrape_avatar_map = _avatar_url_map_from_df(df, avatar_urls)
+            sessions_avatar_map = (
+                load_sessions_avatar_map(sh)
+                if sheets_on and sh is not None
+                else scrape_avatar_map
+            )
+            notify_diff_df = enrich_diff_df_avatars(
+                history_append_df,
+                sessions_map=sessions_avatar_map,
+                baseline_avatar_map=prev_baseline_avatar_map,
+                scrape_map=scrape_avatar_map,
+            )
+        except Exception:
+            notify_diff_df = history_append_df
         try:
             from telegram_notify import maybe_send_telegram_diff
 
             tg_result = maybe_send_telegram_diff(
                 cfg,
-                history_append_df,
+                notify_diff_df,
                 sheet_url=sheet_url,
                 http_session=session,
             )
