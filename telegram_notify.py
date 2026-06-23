@@ -155,21 +155,48 @@ def _collect_session_groups(diff_df: pd.DataFrame) -> list[dict[str, Any]]:
     return [buckets[k] for k in order]
 
 
-def _format_session_line(group: dict[str, Any]) -> str:
-    row: pd.Series = group["meta"]
-    kind = str(group.get("kind", "") or "")
+def _bold_html(text: str) -> str:
+    return f"<b>{_escape_telegram_html(text)}</b>"
+
+
+def _format_members_html(names: list[str]) -> str:
+    clean = [n.strip() for n in names if str(n or "").strip()]
+    if not clean:
+        return _escape_telegram_html("（無姓名）")
+    return "、".join(_bold_html(n) for n in clean)
+
+
+def _session_when_text(row: pd.Series) -> str:
     date = _short_date(row.get("場次日期"))
     dow = str(row.get("星期", "") or "").strip()
     slot = _short_slot(row.get("時段"))
     if date and dow and slot:
-        when = f"{date}（{dow}）{slot}"
-    elif date and slot:
-        when = f"{date} {slot}"
-    else:
-        when = " ".join(x for x in (date, dow, slot) if x).strip() or "（場次未知）"
+        return f"{date}（{dow}）{slot}"
+    if date and slot:
+        return f"{date} {slot}"
+    return " ".join(x for x in (date, dow, slot) if x).strip() or "（場次未知）"
+
+
+def _format_session_line(group: dict[str, Any]) -> str:
+    row: pd.Series = group["meta"]
+    kind = str(group.get("kind", "") or "")
+    when = _session_when_text(row)
     members = _format_members(group.get("members") or [])
     quota = _format_quota(row)
     return f"{_kind_icon(kind)} {when}　{members}{quota}"
+
+
+def _format_session_lines_html(group: dict[str, Any]) -> list[str]:
+    row: pd.Series = group["meta"]
+    kind = str(group.get("kind", "") or "")
+    when = _escape_telegram_html(_session_when_text(row))
+    members = _format_members_html(group.get("members") or [])
+    quota = _escape_telegram_html(_format_quota(row))
+    head = f"{_kind_icon(kind)} {when}"
+    clean = [n.strip() for n in (group.get("members") or []) if str(n or "").strip()]
+    if not clean:
+        return [f"{head}　{members}{quota}"]
+    return [head, f"   {members}{quota}"]
 
 
 def _group_by_course(groups: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -196,14 +223,11 @@ def _telegram_sheet_link(sheet_url: str) -> str:
     return f'<a href="{href}">📎 開啟試算表</a>'
 
 
-def format_diff_message(
+def _format_diff_message_plain(
     diff_df: pd.DataFrame,
     *,
     sheet_url: str | None = None,
-    telegram_html: bool = False,
 ) -> str:
-    if diff_df.empty:
-        return ""
     added = removed = 0
     if "異動類型" in diff_df.columns:
         added = int((diff_df["異動類型"] == "新增").sum())
@@ -242,19 +266,75 @@ def format_diff_message(
             ]
         )
 
-    link_suffix = ""
     if sheet_url:
-        if telegram_html:
-            link_suffix = f"\n{_LINE_SEP}\n{_telegram_sheet_link(sheet_url)}"
-        else:
-            lines.extend([_LINE_SEP, "📎 試算表", sheet_url.strip()])
+        lines.extend([_LINE_SEP, "📎 試算表", sheet_url.strip()])
 
-    if telegram_html:
-        text = "\n".join(_escape_telegram_html(line) for line in lines).strip()
-        if link_suffix:
-            text += link_suffix
+    return "\n".join(lines).strip()
+
+
+def _format_diff_message_telegram_html(
+    diff_df: pd.DataFrame,
+    *,
+    sheet_url: str | None = None,
+) -> str:
+    added = removed = 0
+    if "異動類型" in diff_df.columns:
+        added = int((diff_df["異動類型"] == "新增").sum())
+        removed = int((diff_df["異動類型"] == "刪除").sum())
+    scan_at = ""
+    if "掃描時間" in diff_df.columns and not diff_df["掃描時間"].empty:
+        scan_at = str(diff_df["掃描時間"].iloc[0] or "").strip()
+
+    lines = [f"🏸 {_bold_html('人員異動')}"]
+    if scan_at:
+        t = _escape_telegram_html(_short_scan_at(scan_at))
+        lines.append(f"🕐 {t}　🟢 +{added}　🔴 -{removed}")
     else:
-        text = "\n".join(lines).strip()
+        lines.append(f"🟢 +{added}　🔴 -{removed}")
+    lines.append(_escape_telegram_html(_LINE_SEP))
+
+    session_groups = _collect_session_groups(diff_df)
+    shown = 0
+    hidden = 0
+    for title, groups in _group_by_course(session_groups):
+        block: list[str] = []
+        for group in groups:
+            if shown >= MAX_DETAIL_SESSIONS:
+                hidden += 1
+                continue
+            block.extend(_format_session_lines_html(group))
+            shown += 1
+        if block:
+            lines.append(_bold_html(title))
+            lines.extend(block)
+
+    if hidden > 0:
+        lines.append(_escape_telegram_html(_LINE_SEP))
+        lines.append(
+            _escape_telegram_html(
+                f"⚠️ 另有 {hidden} 場次未顯示，請開試算表「掃描歷史」"
+            )
+        )
+
+    if sheet_url:
+        lines.append(_escape_telegram_html(_LINE_SEP))
+        lines.append(_telegram_sheet_link(sheet_url))
+
+    return "\n".join(lines).strip()
+
+
+def format_diff_message(
+    diff_df: pd.DataFrame,
+    *,
+    sheet_url: str | None = None,
+    telegram_html: bool = False,
+) -> str:
+    if diff_df.empty:
+        return ""
+    if telegram_html:
+        text = _format_diff_message_telegram_html(diff_df, sheet_url=sheet_url)
+    else:
+        text = _format_diff_message_plain(diff_df, sheet_url=sheet_url)
     if len(text) > MAX_MESSAGE_LEN:
         text = text[: MAX_MESSAGE_LEN - 20].rstrip() + "\n…（訊息過長已截斷）"
     return text
