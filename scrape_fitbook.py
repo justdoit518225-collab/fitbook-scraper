@@ -24,6 +24,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
@@ -35,6 +36,7 @@ from PIL import Image as PILImage
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 LAST_SCAN_STATE_PATH = Path(__file__).resolve().parent / "last_scan_state.json"
@@ -144,8 +146,7 @@ def extract_json_after(html: str, needle: str) -> Any:
 
 def fetch_home_html(cfg: dict[str, Any], session: requests.Session) -> str:
     url = f"{cfg['base_url']}{cfg['home_path']}"
-    r = session.get(url, timeout=60)
-    r.raise_for_status()
+    r = _session_get_with_retry(session, url)
     r.encoding = r.apparent_encoding or "utf-8"
     return r.text
 
@@ -190,8 +191,7 @@ def fetch_template_courses(
         f"{cfg['base_url']}/{cfg['store_path']}/course_template/"
         f"{cfg['place_id']}?id={template_id}"
     )
-    r = session.get(url, timeout=60)
-    r.raise_for_status()
+    r = _session_get_with_retry(session, url)
     return r.json()
 
 
@@ -328,8 +328,7 @@ def fetch_member_course_html(
         "Referer": f"{cfg['base_url']}{cfg.get('home_path') or ''}",
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
     }
-    r = session.get(url, headers=headers, timeout=60)
-    r.raise_for_status()
+    r = _session_get_with_retry(session, url, headers=headers)
     r.encoding = r.apparent_encoding or "utf-8"
     return r.text
 
@@ -854,6 +853,34 @@ def _make_http_session(cfg: dict[str, Any]) -> requests.Session:
     return session
 
 
+def _session_get_with_retry(
+    session: requests.Session,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: int | float = 60,
+    tries: int = 3,
+    pause: float = 2.0,
+) -> requests.Response:
+    """GET 含短暫重試，應付 FitBook 偶發斷線（RemoteDisconnected）。"""
+    last_err: Exception | None = None
+    for attempt in range(tries):
+        try:
+            r = session.get(url, headers=headers, timeout=timeout)
+            if r.status_code in (429, 502, 503, 504) and attempt < tries - 1:
+                time.sleep(pause * (attempt + 1))
+                continue
+            r.raise_for_status()
+            return r
+        except (ConnectionError, Timeout, ChunkedEncodingError) as e:
+            last_err = e
+            if attempt < tries - 1:
+                time.sleep(pause * (attempt + 1))
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"GET 失敗：{url}")
+
+
 def _iter_template_courses(
     cfg: dict[str, Any],
     session: requests.Session,
@@ -876,6 +903,7 @@ def _iter_template_courses(
             continue
         tid = int(t["id"])
         data = fetch_template_courses(cfg, session, tid)
+        time.sleep(0.15)
         for c in data.get("courses") or []:
             try:
                 rc_int = int(c.get("reservation_count") or 0)
@@ -952,7 +980,10 @@ def run_quick_check(cfg: dict[str, Any]) -> tuple[bool, str]:
     if not baseline_compare:
         return True, "尚無比對基準，需完整掃描"
 
-    counts = fetch_light_session_counts(cfg, today=today)
+    try:
+        counts = fetch_light_session_counts(cfg, today=today)
+    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError) as e:
+        return False, f"快掃連線失敗，略過本次（{type(e).__name__}）"
     if light_counts_changed_since_baseline(baseline_compare, counts, today):
         changed = []
         for url in set(baseline_compare) | set(counts):
@@ -1544,8 +1575,13 @@ def main() -> None:
             return
         print(f"快掃：{reason}，啟動深度掃描")
 
+    try:
+        df, avatar_urls, session = run_once()
+    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError) as e:
+        print(f"連線失敗，本次掃描略過：{e}")
+        return
+
     out = Path(__file__).resolve().parent / cfg["output_excel"]
-    df, avatar_urls, session = run_once()
 
     history_cols = list(HISTORY_COLUMNS)
     current_state = session_state_from_dataframe(df, avatar_urls)
