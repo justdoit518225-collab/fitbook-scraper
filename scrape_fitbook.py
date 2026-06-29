@@ -7,8 +7,8 @@ FitBook：指定「球敘」場館之場次；僅寫入「已報名人數 > 0」
 
 異動歷史（v2 設計）：
 - 比對基準存在試算表隱藏分頁 `_scan_baseline`（本機與雲端共用同一份基準）
-- 每週一 08:00 由 GitHub Actions `FitBook Weekly Reset` 清空歷史、重設基準
 - 一般掃描：與基準比對，僅將「新增／刪除」列插入「掃描歷史」最上方
+- 手動重設：`python scrape_fitbook.py --reset-baseline` 可清空歷史並重建基準
 - 任一場解析失敗（Cookie/網路/網頁改版）→ 該次不寫歷史、不更新基準
 - 比對僅含「場次日期 >= 今天」場次；無有效基準時當作首次執行
 - 本機若無 Google Sheets，退回使用 last_scan_state.json
