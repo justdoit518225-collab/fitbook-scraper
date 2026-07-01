@@ -35,7 +35,19 @@ def effective_line_credentials(cfg: dict[str, Any]) -> tuple[str, str]:
     return token, user_id
 
 
+def _line_notify_config_enabled(cfg: dict[str, Any]) -> bool:
+    """是否啟用 LINE 通知（預設關閉，需明確設 line_notify_enabled: true）。"""
+    if cfg.get("line_notify_enabled") is True:
+        return True
+    if cfg.get("line_notify_enabled") is False:
+        return False
+    env = (os.environ.get("LINE_NOTIFY_ENABLED") or "").strip().lower()
+    return env in ("1", "true", "yes")
+
+
 def line_notify_enabled(cfg: dict[str, Any]) -> bool:
+    if not _line_notify_config_enabled(cfg):
+        return False
     token, user_id = effective_line_credentials(cfg)
     if not token:
         return False
@@ -97,6 +109,8 @@ def maybe_send_line_diff(
     sheet_url: str | None = None,
 ) -> str | None:
     """有異動且已設定 Token（廣播或 User ID 推播）時發送；未設定則略過。"""
+    if not line_notify_enabled(cfg):
+        return None
     if diff_df is None or diff_df.empty:
         return None
     token, user_id = effective_line_credentials(cfg)

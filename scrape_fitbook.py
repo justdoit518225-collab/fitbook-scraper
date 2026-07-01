@@ -1729,7 +1729,7 @@ def main() -> None:
             from line_notify import maybe_send_line_diff
 
             line_result = maybe_send_line_diff(
-                cfg, history_append_df, sheet_url=sheet_url
+                cfg, notify_diff_df, sheet_url=sheet_url
             )
             if line_result:
                 notify_parts.append(line_result)

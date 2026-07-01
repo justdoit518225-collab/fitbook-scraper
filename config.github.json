@@ -8,7 +8,7 @@
   "google_service_account_json": "google_service_account.json",
   "cookie_header": "",
   "cookie_env": "FITBOOK_COOKIE",
-  "line_use_broadcast": true,
+  "line_notify_enabled": false,
   "quick_scan_enabled": true,
   "quick_scan_interval_minutes": 2,
   "full_scan_every_quick_checks": 15,
