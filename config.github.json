@@ -23,5 +23,6 @@
   "match_all_templates": true,
   "include_zero_reservation_sessions": false,
   "merge_session_cells": true,
-  "telegram_collage_enabled": false
+  "telegram_collage_enabled": false,
+  "scan_days_ahead": 42
 }

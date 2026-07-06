@@ -26,7 +26,7 @@ import re
 import tempfile
 import time
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -151,8 +151,138 @@ def fetch_home_html(cfg: dict[str, Any], session: requests.Session) -> str:
     return r.text
 
 
+_COURSE_TEMPLATE_NEEDLES = (
+    "let courseTemplates = ",
+    "var courseTemplates = ",
+    "const courseTemplates = ",
+    "courseTemplates = ",
+)
+
+
 def parse_course_templates(html: str) -> list[dict[str, Any]]:
-    return extract_json_after(html, "let courseTemplates = ")
+    for needle in _COURSE_TEMPLATE_NEEDLES:
+        if needle in html:
+            return extract_json_after(html, needle)
+    return []
+
+
+def _home_uses_legacy_course_templates(html: str) -> bool:
+    return any(n in html for n in _COURSE_TEMPLATE_NEEDLES)
+
+
+def _course_id_from_member_url(url: str | None) -> int | None:
+    m = re.search(r"/member/course/(\d+)/", str(url or ""))
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _course_date_api_url(cfg: dict[str, Any]) -> str:
+    return f"{cfg['base_url']}/{cfg['store_path']}/course/{cfg['place_id']}"
+
+
+def _scan_days_ahead(cfg: dict[str, Any]) -> int:
+    try:
+        n = int(cfg.get("scan_days_ahead") or 42)
+    except (TypeError, ValueError):
+        n = 42
+    return max(7, min(n, 90))
+
+
+def fetch_courses_for_date(
+    cfg: dict[str, Any],
+    session: requests.Session,
+    day: date,
+) -> tuple[str, str, list[dict[str, Any]]]:
+    """FitBook 新版：GET /{store}/course/{place}?date=YYYY-MM-DD"""
+    r = _session_get_with_retry(
+        session,
+        _course_date_api_url(cfg),
+        params={"date": day.strftime("%Y-%m-%d")},
+    )
+    data = r.json()
+    show_date = str(data.get("show_date") or "").strip()
+    dow = str(data.get("show_short_day_of_week") or "").strip()
+    courses = data.get("courses") or []
+    if not isinstance(courses, list):
+        courses = []
+    return show_date, dow, courses
+
+
+def _normalize_course_record(
+    course: dict[str, Any],
+    *,
+    show_date: str,
+    day_of_week: str,
+) -> dict[str, Any]:
+    out = dict(course)
+    cid = _course_id_from_member_url(out.get("url"))
+    if cid is not None:
+        out["id"] = cid
+    if show_date:
+        out["date_val"] = show_date
+        out["date"] = show_date
+    if day_of_week:
+        out["day_of_week_val"] = day_of_week
+        out["day_of_week"] = day_of_week
+    return out
+
+
+def _append_courses_from_day(
+    out: list[tuple[str, dict[str, Any]]],
+    *,
+    courses: list[dict[str, Any]],
+    show_date: str,
+    day_of_week: str,
+    today: date,
+    include_zero_reservation: bool,
+) -> None:
+    for raw in courses:
+        if not isinstance(raw, dict):
+            continue
+        c = _normalize_course_record(
+            raw, show_date=show_date, day_of_week=day_of_week
+        )
+        try:
+            rc_int = int(c.get("reservation_count") or 0)
+        except (TypeError, ValueError):
+            rc_int = 0
+        if rc_int <= 0 and not include_zero_reservation:
+            continue
+        sdate = _parse_session_date_val(c.get("date_val"))
+        if sdate is not None and sdate < today:
+            continue
+        name = str(c.get("name") or "").strip()
+        out.append((name, c))
+
+
+def _iter_courses_by_date_api(
+    cfg: dict[str, Any],
+    session: requests.Session,
+    *,
+    today: date,
+    include_zero_reservation: bool,
+    days_ahead: int | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    out: list[tuple[str, dict[str, Any]]] = []
+    ahead = days_ahead if days_ahead is not None else _scan_days_ahead(cfg)
+    for offset in range(ahead):
+        day = today + timedelta(days=offset)
+        show_date, dow, courses = fetch_courses_for_date(cfg, session, day)
+        _append_courses_from_day(
+            out,
+            courses=courses,
+            show_date=show_date,
+            day_of_week=dow,
+            today=today,
+            include_zero_reservation=include_zero_reservation,
+        )
+        if offset + 1 < ahead:
+            time.sleep(0.1)
+    return out
 
 
 def course_name_without_venue(template_name: str, venue_label: str) -> str:
@@ -858,6 +988,7 @@ def _session_get_with_retry(
     url: str,
     *,
     headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
     timeout: int | float = 60,
     tries: int = 3,
     pause: float = 2.0,
@@ -866,7 +997,7 @@ def _session_get_with_retry(
     last_err: Exception | None = None
     for attempt in range(tries):
         try:
-            r = session.get(url, headers=headers, timeout=timeout)
+            r = session.get(url, headers=headers, params=params, timeout=timeout)
             if r.status_code in (429, 502, 503, 504) and attempt < tries - 1:
                 time.sleep(pause * (attempt + 1))
                 continue
@@ -886,35 +1017,54 @@ def _iter_template_courses(
     session: requests.Session,
     *,
     today: date,
+    days_ahead: int | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """回傳 (模板名稱, 課程 dict) 列表，篩選規則與 run_once 相同。"""
-    venues = cfg["venues"]
-    ball_kw = cfg.get("only_ball_you_name_contains") or ""
-    match_all_templates = bool(cfg.get("match_all_templates"))
+    """回傳 (課程名稱, 課程 dict) 列表，篩選規則與 run_once 相同。"""
     include_zero_reservation = bool(cfg.get("include_zero_reservation_sessions"))
 
     html = fetch_home_html(cfg, session)
+    if _is_login_wall(html):
+        raise ValueError("首頁被導向登入頁，請更新 Cookie")
+
+    if not _home_uses_legacy_course_templates(html):
+        return _iter_courses_by_date_api(
+            cfg,
+            session,
+            today=today,
+            include_zero_reservation=include_zero_reservation,
+            days_ahead=days_ahead,
+        )
+
     templates = parse_course_templates(html)
+    if not templates:
+        return _iter_courses_by_date_api(
+            cfg,
+            session,
+            today=today,
+            include_zero_reservation=include_zero_reservation,
+            days_ahead=days_ahead,
+        )
+
+    venues = cfg["venues"]
+    ball_kw = cfg.get("only_ball_you_name_contains") or ""
+    match_all_templates = bool(cfg.get("match_all_templates"))
     out: list[tuple[str, dict[str, Any]]] = []
     for t in templates:
         name = t.get("name") or ""
-        ok, venue_label = template_matches_venue(name, venues, ball_kw)
+        ok, _venue_label = template_matches_venue(name, venues, ball_kw)
         if not ok and not match_all_templates:
             continue
         tid = int(t["id"])
         data = fetch_template_courses(cfg, session, tid)
         time.sleep(0.15)
-        for c in data.get("courses") or []:
-            try:
-                rc_int = int(c.get("reservation_count") or 0)
-            except (TypeError, ValueError):
-                rc_int = 0
-            if rc_int <= 0 and not include_zero_reservation:
-                continue
-            sdate = _parse_session_date_val(c.get("date_val"))
-            if sdate is not None and sdate < today:
-                continue
-            out.append((str(name), c))
+        _append_courses_from_day(
+            out,
+            courses=data.get("courses") or [],
+            show_date="",
+            day_of_week="",
+            today=today,
+            include_zero_reservation=include_zero_reservation,
+        )
     return out
 
 
@@ -924,7 +1074,7 @@ def fetch_light_session_counts(
     *,
     today: date | None = None,
 ) -> dict[str, int]:
-    """僅透過首頁 + course_template API 取得各場次已報名人數（不抓會員頁）。"""
+    """透過首頁或日期 API 取得各場次已報名人數（不抓會員頁）。"""
     own_session = session is None
     if own_session:
         session = _make_http_session(cfg)
@@ -982,8 +1132,8 @@ def run_quick_check(cfg: dict[str, Any]) -> tuple[bool, str]:
 
     try:
         counts = fetch_light_session_counts(cfg, today=today)
-    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError) as e:
-        return False, f"快掃連線失敗，略過本次（{type(e).__name__}）"
+    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError, ValueError) as e:
+        return False, f"快掃失敗，略過本次（{type(e).__name__}）"
     if light_counts_changed_since_baseline(baseline_compare, counts, today):
         changed = []
         for url in set(baseline_compare) | set(counts):
@@ -1036,26 +1186,32 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
         name_note = ""
 
         if rc_int > 0 and cookie:
-            try:
-                page_html = fetch_member_course_html(
-                    cfg, session, int(c["id"]), int(cfg["place_id"])
-                )
-                if _is_login_wall(page_html):
-                    name_note = (
-                        "（Cookie 可能已過期或未登入，課程頁被導向登入頁；"
-                        "請重新登入 FitBook 後更新 Cookie）"
+            course_id = c.get("id")
+            if course_id is None:
+                course_id = _course_id_from_member_url(c.get("url"))
+            if course_id is None:
+                name_note = "（無法從預約頁面解析課程 ID）"
+            else:
+                try:
+                    page_html = fetch_member_course_html(
+                        cfg, session, int(course_id), int(cfg["place_id"])
                     )
-                else:
-                    members = parse_members_with_avatars_from_html(
-                        page_html, teacher_name, extra_selectors
-                    )
-                    if not members:
+                    if _is_login_wall(page_html):
                         name_note = (
-                            "（課程頁已登入但未解析到姓名，"
-                            "可能網頁改版；可調整 member_name_css_selectors）"
+                            "（Cookie 可能已過期或未登入，課程頁被導向登入頁；"
+                            "請重新登入 FitBook 後更新 Cookie）"
                         )
-            except requests.RequestException:
-                name_note = "（課程頁請求失敗）"
+                    else:
+                        members = parse_members_with_avatars_from_html(
+                            page_html, teacher_name, extra_selectors
+                        )
+                        if not members:
+                            name_note = (
+                                "（課程頁已登入但未解析到姓名，"
+                                "可能網頁改版；可調整 member_name_css_selectors）"
+                            )
+                except requests.RequestException:
+                    name_note = "（課程頁請求失敗）"
         elif rc_int > 0:
             name_note = "（請在 config.json 設定 cookie_header 或環境變數 FITBOOK_COOKIE）"
 
@@ -1577,8 +1733,8 @@ def main() -> None:
 
     try:
         df, avatar_urls, session = run_once()
-    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError) as e:
-        print(f"連線失敗，本次掃描略過：{e}")
+    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError, ValueError) as e:
+        print(f"掃描失敗，本次略過：{e}")
         return
 
     out = Path(__file__).resolve().parent / cfg["output_excel"]
