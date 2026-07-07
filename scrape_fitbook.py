@@ -1118,10 +1118,16 @@ def run_quick_check(cfg: dict[str, Any]) -> tuple[bool, str]:
     tz = _scan_timezone(cfg)
     today = datetime.now(tz).date()
     from google_sheets_export import google_sheets_enabled, open_spreadsheet
+    from gspread.exceptions import APIError
 
     sheets_on = google_sheets_enabled(cfg)
-    sh = open_spreadsheet(cfg) if sheets_on else None
-    baseline = _load_baseline(cfg, sh)
+    try:
+        sh = open_spreadsheet(cfg) if sheets_on else None
+        baseline = _load_baseline(cfg, sh)
+    except APIError as e:
+        if sheets_on:
+            return False, f"試算表暫時無法讀取，略過本次（{type(e).__name__}）"
+        raise
     baseline_compare = filter_state_active_sessions(baseline, today)
 
     if _should_force_periodic_full_scan(cfg):
@@ -1746,7 +1752,15 @@ def main() -> None:
     current_state = filter_state_active_sessions(current_state, today)
     placeholder_sessions = _count_placeholder_sessions(df)
     sheets_on = google_sheets_enabled(cfg)
-    sh = open_spreadsheet(cfg) if sheets_on else None
+    sh = None
+    if sheets_on:
+        try:
+            from gspread.exceptions import APIError
+
+            sh = open_spreadsheet(cfg)
+        except APIError as e:
+            print(f"試算表暫時無法連線，本次掃描略過：{e}")
+            return
 
     history_append_df: pd.DataFrame | None = None
     prev_baseline_avatar_map: dict[tuple[str, str], str] = {}

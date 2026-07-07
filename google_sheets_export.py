@@ -14,12 +14,17 @@ Google 試算表匯出（服務帳戶）。
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 import gspread
 import pandas as pd
+from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
+
+T = TypeVar("T")
+_GSPREAD_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 HISTORY_SHEET_NAME = "掃描歷史"
 BASELINE_SHEET_NAME = "_scan_baseline"
@@ -166,6 +171,43 @@ def google_sheets_enabled(cfg: dict[str, Any]) -> bool:
     return p.is_file()
 
 
+def _gspread_api_error_code(err: APIError) -> int | None:
+    resp = getattr(err, "response", None)
+    code = getattr(resp, "status_code", None) if resp is not None else None
+    if isinstance(code, int):
+        return code
+    m = re.search(r"\[(\d{3})\]", str(err))
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _gspread_call_with_retry(
+    fn: Callable[[], T],
+    *,
+    tries: int = 4,
+    pause: float = 2.0,
+) -> T:
+    """Google Sheets API 偶發 503/429 時短暫重試。"""
+    last_err: APIError | None = None
+    for attempt in range(tries):
+        try:
+            return fn()
+        except APIError as e:
+            last_err = e
+            code = _gspread_api_error_code(e)
+            if code in _GSPREAD_RETRYABLE_STATUS and attempt < tries - 1:
+                time.sleep(pause * (attempt + 1))
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("gspread retry failed")
+
+
 def _service_account_path(cfg: dict[str, Any]) -> Path:
     sa = (cfg.get("google_service_account_json") or "").strip()
     p = Path(sa)
@@ -184,7 +226,8 @@ def _gspread_client(cfg: dict[str, Any]) -> gspread.Client:
 
 def _open_spreadsheet(cfg: dict[str, Any]) -> gspread.Spreadsheet:
     gc = _gspread_client(cfg)
-    return gc.open_by_key((cfg.get("google_sheet_id") or "").strip())
+    key = (cfg.get("google_sheet_id") or "").strip()
+    return _gspread_call_with_retry(lambda: gc.open_by_key(key))
 
 
 def _ensure_worksheet(sh: gspread.Spreadsheet, title: str, rows: int = 2000, cols: int = 20) -> gspread.Worksheet:
@@ -740,12 +783,12 @@ def _hide_worksheet(sh: Any, ws: Any) -> None:
 
 
 def load_baseline_from_sheet(sh: Any) -> dict[str, dict[str, Any]]:
-    """從 _scan_baseline 分頁讀取基準。失敗回傳空字典（視為「沒有基準」）。"""
+    """從 _scan_baseline 分頁讀取基準。分頁不存在回傳空字典；API 錯誤則拋出。"""
     try:
         ws = sh.worksheet(BASELINE_SHEET_NAME)
     except gspread.WorksheetNotFound:
         return {}
-    rows = ws.get_all_values()
+    rows = _gspread_call_with_retry(lambda: ws.get_all_values())
     if len(rows) < 2:
         return {}
     header = rows[0]
