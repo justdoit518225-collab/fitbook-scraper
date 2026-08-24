@@ -4,6 +4,7 @@ FitBook：指定「球敘」場館之場次；僅寫入「已報名人數 > 0」
 
 會員：須登入 Cookie（cookie_header 或 FITBOOK_COOKIE），自課程頁解析「已預約會員」
 之暱稱與頭像網址；每位會員一列，頭像可為 Excel 內嵌圖或 Google 試算表 =IMAGE(url)。
+FitBook 2026+ 課程頁僅在 LINE WebView User-Agent 下回傳會員名單（見 member_course_user_agent）。
 
 異動歷史（v2 設計）：
 - 比對基準存在試算表隱藏分頁 `_scan_baseline`（本機與雲端共用同一份基準）
@@ -457,6 +458,7 @@ def fetch_member_course_html(
     headers = {
         "Referer": f"{cfg['base_url']}{cfg.get('home_path') or ''}",
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "User-Agent": _member_course_user_agent(cfg),
     }
     r = _session_get_with_retry(session, url, headers=headers)
     r.encoding = r.apparent_encoding or "utf-8"
@@ -968,6 +970,18 @@ def _should_force_periodic_full_scan(cfg: dict[str, Any]) -> bool:
     return False
 
 
+# FitBook 2026+ 以一般瀏覽器 UA 開課程頁僅顯示預約表單；「已預約會員」需 LINE WebView UA。
+_DEFAULT_MEMBER_COURSE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 12; wv) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36 Line/14.11.0"
+)
+
+
+def _member_course_user_agent(cfg: dict[str, Any]) -> str:
+    ua = (cfg.get("member_course_user_agent") or "").strip()
+    return ua or _DEFAULT_MEMBER_COURSE_USER_AGENT
+
+
 def _make_http_session(cfg: dict[str, Any]) -> requests.Session:
     session = requests.Session()
     session.headers.update(
@@ -1213,8 +1227,9 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
                         )
                         if not members:
                             name_note = (
-                                "（課程頁已登入但未解析到姓名，"
-                                "可能網頁改版；可調整 member_name_css_selectors）"
+                                "（課程頁已登入但未解析到會員姓名，"
+                                "可能 FitBook 再度改版或場館關閉名單顯示；"
+                                "可調整 member_name_css_selectors）"
                             )
                 except requests.RequestException:
                     name_note = "（課程頁請求失敗）"
