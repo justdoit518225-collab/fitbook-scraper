@@ -10,7 +10,7 @@ FitBook 2026+ 課程頁僅在 LINE WebView User-Agent 下回傳會員名單（�
 - 比對基準存在試算表隱藏分頁 `_scan_baseline`（本機與雲端共用同一份基準）
 - 一般掃描：與基準比對，僅將「新增／刪除」列插入「掃描歷史」最上方
 - 手動重設：`python scrape_fitbook.py --reset-baseline` 可清空歷史並重建基準
-- 任一場解析失敗（Cookie/網路/網頁改版）→ 該次不寫歷史、不更新基準
+- 任一場解析失敗（Cookie/網路/網頁改版）→ 該場次略過比對；其餘場次仍寫歷史並更新基準
 - 比對僅含「場次日期 >= 今天」場次；無有效基準時當作首次執行
 - 本機若無 Google Sheets，退回使用 last_scan_state.json
 
@@ -569,16 +569,47 @@ def _members_list_from_group(grp: pd.DataFrame) -> list[str]:
 
 def _count_placeholder_sessions(df: pd.DataFrame) -> int:
     """有報名但會員欄僅為錯誤說明文字的場次數。"""
+    return len(_placeholder_session_urls(df))
+
+
+def _placeholder_session_urls(df: pd.DataFrame) -> set[str]:
+    """解析失敗（僅有括號說明）的場次預約頁面 URL。"""
     if df.empty or "會員暱稱" not in df.columns or "預約頁面" not in df.columns:
-        return 0
-    n = 0
-    for _, grp in df.groupby("預約頁面", sort=False):
+        return set()
+    out: set[str] = set()
+    for url, grp in df.groupby("預約頁面", sort=False):
+        u = str(url).strip()
+        if not u:
+            continue
         names = _members_list_from_group(grp)
         if not names and any(
             _is_placeholder_member_name(x) for x in grp["會員暱稱"].astype(str)
         ):
-            n += 1
-    return n
+            out.add(u)
+    return out
+
+
+def _exclude_session_urls(
+    state: dict[str, dict[str, Any]], skip_urls: set[str]
+) -> dict[str, dict[str, Any]]:
+    if not skip_urls:
+        return state
+    return {k: v for k, v in state.items() if str(k) not in skip_urls}
+
+
+def _merge_baseline_update(
+    baseline: dict[str, dict[str, Any]],
+    current: dict[str, dict[str, Any]],
+    *,
+    skip_urls: set[str],
+) -> dict[str, dict[str, Any]]:
+    """更新基準：成功解析的場次寫入；解析失敗的場次保留舊基準。"""
+    out = dict(baseline)
+    for url, entry in current.items():
+        if str(url) in skip_urls:
+            continue
+        out[str(url)] = entry
+    return out
 
 
 def _member_avatars_for_group(
@@ -1765,7 +1796,8 @@ def main() -> None:
     tz = _scan_timezone(cfg)
     today = datetime.now(tz).date()
     current_state = filter_state_active_sessions(current_state, today)
-    placeholder_sessions = _count_placeholder_sessions(df)
+    skip_urls = _placeholder_session_urls(df)
+    placeholder_sessions = len(skip_urls)
     sheets_on = google_sheets_enabled(cfg)
     sh = None
     if sheets_on:
@@ -1796,21 +1828,24 @@ def main() -> None:
     else:
         baseline = _load_baseline(cfg, sh)
         baseline_compare = filter_state_active_sessions(baseline, today)
-        has_baseline = bool(baseline_compare)
+        baseline_cmp = _exclude_session_urls(baseline_compare, skip_urls)
+        current_cmp = _exclude_session_urls(current_state, skip_urls)
+        has_baseline = bool(baseline_cmp)
+        skip_note = (
+            f"（略過 {placeholder_sessions} 場解析失敗）"
+            if placeholder_sessions
+            else ""
+        )
 
-        if placeholder_sessions > 0:
-            info = (
-                f"本次有 {placeholder_sessions} 個場次無法解析會員，"
-                f"略過掃描歷史與基準更新"
-            )
-        elif not has_baseline:
-            _save_baseline(cfg, sh, current_state)
-            info = "首次建立比對基準（無新增/刪除）"
-        elif snapshot_has_member_change(baseline_compare, current_state):
+        if not has_baseline:
+            merged = _merge_baseline_update(baseline, current_state, skip_urls=skip_urls)
+            _save_baseline(cfg, sh, merged)
+            info = f"首次建立比對基準（無新增/刪除）{skip_note}"
+        elif snapshot_has_member_change(baseline_cmp, current_cmp):
             chunk = build_history_diff_chunk(
                 df,
-                baseline_compare,
-                current_state,
+                baseline_cmp,
+                current_cmp,
                 history_cols,
                 today=today,
                 avatar_urls=avatar_urls,
@@ -1820,11 +1855,11 @@ def main() -> None:
                 removed_n = int((chunk["異動類型"] == "刪除").sum())
                 total_curr = sum(
                     len((v or {}).get("members") or [])
-                    for v in current_state.values()
+                    for v in current_cmp.values()
                 )
                 total_prev = sum(
                     len((v or {}).get("members") or [])
-                    for v in baseline_compare.values()
+                    for v in baseline_cmp.values()
                 )
                 if (
                     removed_n >= 8
@@ -1834,25 +1869,31 @@ def main() -> None:
                     info = (
                         f"異動異常（刪除 {removed_n}、新增 {added_n}，"
                         f"目前/基準會員數 {total_curr}/{total_prev}），"
-                        f"略過寫入掃描歷史且不更新基準"
+                        f"略過寫入掃描歷史且不更新基準{skip_note}"
                     )
                 else:
                     history_append_df = _sort_dataframe_by_session_date(chunk)
                     from google_sheets_export import baseline_member_avatar_map
 
                     prev_baseline_avatar_map = baseline_member_avatar_map(
-                        baseline_compare
+                        baseline_cmp
                     )
-                    _save_baseline(cfg, sh, current_state)
+                    merged = _merge_baseline_update(
+                        baseline, current_state, skip_urls=skip_urls
+                    )
+                    _save_baseline(cfg, sh, merged)
                     info = (
                         f"人員異動 {len(chunk)} 列"
-                        f"（新增 {added_n}、刪除 {removed_n}）"
+                        f"（新增 {added_n}、刪除 {removed_n}）{skip_note}"
                     )
             else:
-                _save_baseline(cfg, sh, current_state)
-                info = "無有效異動，未追加歷史"
+                merged = _merge_baseline_update(
+                    baseline, current_state, skip_urls=skip_urls
+                )
+                _save_baseline(cfg, sh, merged)
+                info = f"無有效異動，未追加歷史{skip_note}"
         else:
-            info = "與基準無異動，未追加歷史"
+            info = f"與基準無異動，未追加歷史{skip_note}"
 
     if sheets_on:
         url = write_google_sheets(
