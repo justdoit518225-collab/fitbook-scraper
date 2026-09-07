@@ -603,12 +603,18 @@ def _merge_baseline_update(
     *,
     skip_urls: set[str],
 ) -> dict[str, dict[str, Any]]:
-    """更新基準：成功解析的場次寫入；解析失敗的場次保留舊基準。"""
-    out = dict(baseline)
+    """更新基準：成功解析的場次寫入；解析失敗的場次保留舊基準；已從爬取結果消失的場次自基準移除。"""
+    skip = {str(u) for u in skip_urls}
+    out: dict[str, dict[str, Any]] = {}
+    for url, entry in baseline.items():
+        u = str(url)
+        if u in skip:
+            out[u] = entry
     for url, entry in current.items():
-        if str(url) in skip_urls:
+        u = str(url)
+        if u in skip:
             continue
-        out[str(url)] = entry
+        out[u] = entry
     return out
 
 
