@@ -1,4 +1,5 @@
 {
+  "scraper_paused": true,
   "base_url": "https://www.fit-book.com.tw",
   "store_path": "urlname459",
   "place_id": 564,

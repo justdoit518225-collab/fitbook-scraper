@@ -945,6 +945,10 @@ def reset_scan_baseline(*, clear_history: bool = True) -> None:
     _ = clear_history
 
 
+def scraper_paused(cfg: dict[str, Any]) -> bool:
+    return cfg.get("scraper_paused") is True
+
+
 def quick_scan_enabled(cfg: dict[str, Any]) -> bool:
     if cfg.get("quick_scan_enabled") is True:
         return True
@@ -1770,6 +1774,10 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config()
+
+    if scraper_paused(cfg):
+        print("爬蟲已暫停（config scraper_paused=true），本次不掃描、不寫入、不通知。")
+        return
 
     if args.quick_only:
         need_deep, reason = run_quick_check(cfg)
