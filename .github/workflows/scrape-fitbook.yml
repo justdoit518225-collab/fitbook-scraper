@@ -4,11 +4,10 @@
 name: FitBook Scrape
 
 on:
-  # 暫停定時掃描（恢復時取消註解並 push）
-  # schedule:
-  #   # 每 10 分鐘（台灣時間）：:00、:10、:20…
-  #   - cron: "*/10 * * * *"
-  #     timezone: "Asia/Taipei"
+  schedule:
+    # 每 10 分鐘（台灣時間）：:00、:10、:20…
+    - cron: "*/10 * * * *"
+      timezone: "Asia/Taipei"
   workflow_dispatch:
 
 concurrency:
