@@ -41,6 +41,7 @@ from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 LAST_SCAN_STATE_PATH = Path(__file__).resolve().parent / "last_scan_state.json"
+OPEN_SESSIONS_STATE_PATH = Path(__file__).resolve().parent / "open_sessions_state.json"
 QUICK_SCAN_TICK_PATH = Path(__file__).resolve().parent / "quick_scan_tick.json"
 HISTORY_SHEET_NAME = "掃描歷史"
 OUTPUT_COLUMNS = [
@@ -187,9 +188,9 @@ def _course_date_api_url(cfg: dict[str, Any]) -> str:
 
 def _scan_days_ahead(cfg: dict[str, Any]) -> int:
     try:
-        n = int(cfg.get("scan_days_ahead") or 42)
+        n = int(cfg.get("scan_days_ahead") or 60)
     except (TypeError, ValueError):
-        n = 42
+        n = 60
     return max(7, min(n, 90))
 
 
@@ -1073,9 +1074,11 @@ def _iter_template_courses(
     *,
     today: date,
     days_ahead: int | None = None,
+    include_zero_reservation: bool | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """回傳 (課程名稱, 課程 dict) 列表，篩選規則與 run_once 相同。"""
-    include_zero_reservation = bool(cfg.get("include_zero_reservation_sessions"))
+    if include_zero_reservation is None:
+        include_zero_reservation = bool(cfg.get("include_zero_reservation_sessions"))
 
     html = fetch_home_html(cfg, session)
     if _is_login_wall(html):
@@ -1168,6 +1171,235 @@ def light_counts_changed_since_baseline(
     return False
 
 
+def load_open_sessions_baseline(cfg: dict[str, Any], sh: Any | None) -> set[str]:
+    from google_sheets_export import (
+        google_sheets_enabled,
+        load_open_sessions_baseline_from_sheet,
+    )
+
+    if google_sheets_enabled(cfg) and sh is not None:
+        try:
+            return load_open_sessions_baseline_from_sheet(sh)
+        except Exception as e:
+            print(f"從試算表讀取新開場次基準失敗（{e}），改讀本機檔案")
+    if OPEN_SESSIONS_STATE_PATH.is_file():
+        try:
+            with OPEN_SESSIONS_STATE_PATH.open(encoding="utf-8") as f:
+                data = json.load(f)
+                return set(data.get("known_urls", []))
+        except Exception:
+            pass
+    return set()
+
+
+def save_open_sessions_baseline(
+    cfg: dict[str, Any],
+    sh: Any | None,
+    records: list[dict[str, Any]],
+) -> None:
+    from google_sheets_export import (
+        google_sheets_enabled,
+        save_open_sessions_baseline_to_sheet,
+    )
+
+    if google_sheets_enabled(cfg) and sh is not None:
+        try:
+            save_open_sessions_baseline_to_sheet(sh, records)
+        except Exception as e:
+            print(f"寫入試算表新開場次基準失敗：{e}")
+    try:
+        urls = [r["預約頁面"] for r in records if "預約頁面" in r]
+        with OPEN_SESSIONS_STATE_PATH.open("w", encoding="utf-8") as f:
+            json.dump(
+                {"known_urls": urls, "records": records},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+    except Exception as e:
+        print(f"寫入本機新開場次基準失敗：{e}")
+
+
+def process_open_sessions(
+    cfg: dict[str, Any],
+    all_raw_courses: list[tuple[str, dict[str, Any]]],
+    today: date,
+    sh: Any | None,
+    scan_at: str,
+    *,
+    reset_baseline: bool = False,
+) -> tuple[pd.DataFrame | None, str]:
+    """比對所有進行中場次與開場基準，發現新開場次時記錄至 Google 試算表或本地檔案。"""
+    if not cfg.get("open_session_notify_enabled", True):
+        return None, "新開場次監控未啟用"
+
+    venues = cfg.get("venues") or []
+    watch_keywords = [
+        str(k).strip()
+        for k in (cfg.get("open_session_watch_keywords") or [])
+        if str(k).strip()
+    ]
+
+    active_records: dict[str, dict[str, Any]] = {}
+    for name, c in all_raw_courses:
+        url = (c.get("url") or "").strip()
+        if not url:
+            continue
+        sdate = _parse_session_date_val(c.get("date_val")) or _parse_session_date_val(
+            c.get("date")
+        )
+        if sdate is not None and sdate < today:
+            continue
+
+        venue_label = ""
+        for v in venues:
+            for m in v.get("match", []):
+                if m in name:
+                    venue_label = v["label"]
+                    break
+            if venue_label:
+                break
+        if not venue_label:
+            venue_label = name.strip() or "未分類"
+
+        clean_course_name = course_name_without_venue(name, venue_label)
+        date_str = _as_text_cell(c.get("date_val")) or _as_text_cell(c.get("date"))
+        dow_str = _as_text_cell(c.get("day_of_week_val")) or _as_text_cell(
+            c.get("day_of_week")
+        )
+        time_str = _as_text_cell(c.get("show_time")) or _as_text_cell(c.get("time"))
+        order_count = _coerce_nonneg_int(c.get("order_count"))
+
+        active_records[url] = {
+            "預約頁面": url,
+            "課程名稱": clean_course_name,
+            "原始名稱": name,
+            "場館標籤": venue_label,
+            "場次日期": date_str,
+            "星期": dow_str,
+            "時段": time_str,
+            "開放名額": order_count,
+            "首次發現時間": scan_at,
+        }
+
+    known_urls = load_open_sessions_baseline(cfg, sh)
+
+    if reset_baseline or not known_urls:
+        records_to_save = list(active_records.values())
+        save_open_sessions_baseline(cfg, sh, records_to_save)
+        from google_sheets_export import (
+            OPEN_SESSIONS_COLUMNS,
+            OPEN_SESSIONS_SHEET_NAME,
+            _ensure_worksheet,
+            google_sheets_enabled,
+        )
+
+        if google_sheets_enabled(cfg) and sh is not None:
+            hw = _ensure_worksheet(sh, OPEN_SESSIONS_SHEET_NAME)
+            existing = hw.get_all_values()
+            if not existing or not any(str(c).strip() for c in existing[0]):
+                hw.update(
+                    "A1", [OPEN_SESSIONS_COLUMNS], value_input_option="USER_ENTERED"
+                )
+        return (
+            None,
+            f"已初始化新開場次比對基準（現有 {len(records_to_save)} 場，不發送通知）",
+        )
+
+    new_records: list[dict[str, Any]] = []
+    for url, rec in active_records.items():
+        if url not in known_urls:
+            if watch_keywords:
+                matched = any(
+                    kw in rec["原始名稱"] or kw in rec["課程名稱"]
+                    for kw in watch_keywords
+                )
+                if not matched:
+                    continue
+            new_records.append(rec)
+
+    save_open_sessions_baseline(cfg, sh, list(active_records.values()))
+
+    if not new_records:
+        return None, "無新開場次"
+
+    rows = []
+    for r in new_records:
+        rows.append(
+            {
+                "偵測時間": scan_at,
+                "課程名稱": r["課程名稱"],
+                "場館標籤": r["場館標籤"],
+                "場次日期": r["場次日期"],
+                "星期": r["星期"],
+                "時段": r["時段"],
+                "開放名額": r["開放名額"],
+                "預約頁面": r["預約頁面"],
+            }
+        )
+    new_df = pd.DataFrame(rows)
+    new_df = _sort_dataframe_by_session_date(new_df)
+
+    from google_sheets_export import append_open_sessions_to_sheet, google_sheets_enabled
+
+    if google_sheets_enabled(cfg) and sh is not None:
+        try:
+            append_open_sessions_to_sheet(sh, new_df)
+        except Exception as e:
+            print(f"寫入試算表開場紀錄失敗：{e}")
+
+    return new_df, f"發現新開場次 {len(new_records)} 筆，已寫入「開場紀錄」"
+
+
+def run_quick_check_with_courses(
+    cfg: dict[str, Any],
+    all_raw_courses: list[tuple[str, dict[str, Any]]],
+    *,
+    sh: Any | None = None,
+    today: date | None = None,
+) -> tuple[bool, str]:
+    """使用已獲取的場次列表快速比對報名人數。"""
+    tz = _scan_timezone(cfg)
+    if today is None:
+        today = datetime.now(tz).date()
+
+    from google_sheets_export import google_sheets_enabled
+
+    sheets_on = google_sheets_enabled(cfg)
+    baseline = _load_baseline(cfg, sh)
+    baseline_compare = filter_state_active_sessions(baseline, today)
+
+    if _should_force_periodic_full_scan(cfg):
+        return True, "定期完整掃描（防漏同額換人）"
+
+    if not baseline_compare:
+        return True, "尚無比對基準，需完整掃描"
+
+    counts: dict[str, int] = {}
+    for _, c in all_raw_courses:
+        url = (c.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            rc_int = int(c.get("reservation_count") or 0)
+        except (TypeError, ValueError):
+            rc_int = 0
+        counts[url] = rc_int
+
+    if light_counts_changed_since_baseline(baseline_compare, counts, today):
+        changed = []
+        for url in set(baseline_compare) | set(counts):
+            api_n = int(counts.get(url, 0))
+            entry = baseline_compare.get(url, {})
+            base_n = len((entry.get("members") or []) if isinstance(entry, dict) else [])
+            if api_n != base_n:
+                changed.append(f"{base_n}→{api_n}")
+        hint = f"（{len(changed)} 場人數變動）" if changed else ""
+        return True, f"偵測到報名人數異動{hint}"
+
+    return False, "無報名人數異動"
+
+
 def run_quick_check(cfg: dict[str, Any]) -> tuple[bool, str]:
     """執行快掃。回傳 (是否需要深度掃描, 說明)。"""
     tz = _scan_timezone(cfg)
@@ -1209,15 +1441,21 @@ def run_quick_check(cfg: dict[str, Any]) -> tuple[bool, str]:
     return False, "無報名人數異動"
 
 
-def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
-    cfg = load_config()
+def run_once(
+    cfg: dict[str, Any] | None = None,
+    session: requests.Session | None = None,
+    all_courses: list[tuple[str, dict[str, Any]]] | None = None,
+) -> tuple[pd.DataFrame, list[str | None], requests.Session]:
+    if cfg is None:
+        cfg = load_config()
     venues = cfg["venues"]
     ball_kw = cfg.get("only_ball_you_name_contains") or ""
     match_all_templates = bool(cfg.get("match_all_templates"))
     cookie = effective_cookie(cfg)
     extra_selectors = cfg.get("member_name_css_selectors") or []
 
-    session = _make_http_session(cfg)
+    if session is None:
+        session = _make_http_session(cfg)
 
     tz = _scan_timezone(cfg)
     now_local = datetime.now(tz)
@@ -1227,7 +1465,17 @@ def run_once() -> tuple[pd.DataFrame, list[str | None], requests.Session]:
     rows: list[dict[str, Any]] = []
     avatar_urls: list[str | None] = []
 
-    for name, c in _iter_template_courses(cfg, session, today=today):
+    if all_courses is not None:
+        include_zero = bool(cfg.get("include_zero_reservation_sessions"))
+        courses_iter = [
+            (name, c)
+            for name, c in all_courses
+            if include_zero or int(c.get("reservation_count") or 0) > 0
+        ]
+    else:
+        courses_iter = _iter_template_courses(cfg, session, today=today)
+
+    for name, c in courses_iter:
         ok, venue_label = template_matches_venue(
             name, venues, ball_kw
         )
@@ -1779,39 +2027,12 @@ def main() -> None:
         print("爬蟲已暫停（config scraper_paused=true），本次不掃描、不寫入、不通知。")
         return
 
-    if args.quick_only:
-        need_deep, reason = run_quick_check(cfg)
-        print(
-            f"快掃：{reason}（{'需深度掃描' if need_deep else '略過深度掃描'}）"
-        )
-        return
-
-    if (
-        not args.reset_baseline
-        and not args.full
-        and quick_scan_enabled(cfg)
-    ):
-        need_deep, reason = run_quick_check(cfg)
-        if not need_deep:
-            print(f"快掃：{reason}，略過深度掃描")
-            return
-        print(f"快掃：{reason}，啟動深度掃描")
-
-    try:
-        df, avatar_urls, session = run_once()
-    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError, ValueError) as e:
-        print(f"掃描失敗，本次略過：{e}")
-        return
-
-    out = Path(__file__).resolve().parent / cfg["output_excel"]
-
-    history_cols = list(HISTORY_COLUMNS)
-    current_state = session_state_from_dataframe(df, avatar_urls)
+    session = _make_http_session(cfg)
     tz = _scan_timezone(cfg)
-    today = datetime.now(tz).date()
-    current_state = filter_state_active_sessions(current_state, today)
-    skip_urls = _placeholder_session_urls(df)
-    placeholder_sessions = len(skip_urls)
+    now_local = datetime.now(tz)
+    today = now_local.date()
+    scan_at = now_local.strftime("%Y-%m-%d %H:%M:%S")
+
     sheets_on = google_sheets_enabled(cfg)
     sh = None
     if sheets_on:
@@ -1822,6 +2043,92 @@ def main() -> None:
         except APIError as e:
             print(f"試算表暫時無法連線，本次掃描略過：{e}")
             return
+
+    days_ahead = _scan_days_ahead(cfg)
+    try:
+        all_raw_courses = _iter_template_courses(
+            cfg, session, today=today, days_ahead=days_ahead, include_zero_reservation=True
+        )
+    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError, ValueError) as e:
+        print(f"取得場次失敗，本次略過：{e}")
+        return
+
+    open_df, open_info = process_open_sessions(
+        cfg,
+        all_raw_courses,
+        today=today,
+        sh=sh,
+        scan_at=scan_at,
+        reset_baseline=args.reset_baseline,
+    )
+    open_notify_parts: list[str] = []
+    sheet_url = (
+        f"https://docs.google.com/spreadsheets/d/{cfg.get('google_sheet_id')}"
+        if sheets_on
+        else None
+    )
+    if open_df is not None and not open_df.empty:
+        try:
+            from telegram_notify import maybe_send_telegram_new_sessions
+
+            tg_res = maybe_send_telegram_new_sessions(
+                cfg, open_df, sheet_url=sheet_url
+            )
+            if tg_res:
+                open_notify_parts.append(tg_res)
+        except Exception as e:
+            open_notify_parts.append(f"Telegram 新開場次通知失敗：{e}")
+        try:
+            from line_notify import maybe_send_line_new_sessions
+
+            line_res = maybe_send_line_new_sessions(
+                cfg, open_df, sheet_url=sheet_url
+            )
+            if line_res:
+                open_notify_parts.append(line_res)
+        except Exception as e:
+            open_notify_parts.append(f"LINE 新開場次通知失敗：{e}")
+
+    if args.quick_only:
+        open_msg = f"；{open_info}" if open_info else ""
+        open_n_msg = (
+            f"；{'；'.join(open_notify_parts)}" if open_notify_parts else ""
+        )
+        print(f"快掃結束{open_msg}{open_n_msg}")
+        return
+
+    if (
+        not args.reset_baseline
+        and not args.full
+        and quick_scan_enabled(cfg)
+    ):
+        need_deep, reason = run_quick_check_with_courses(
+            cfg, all_raw_courses, sh=sh, today=today
+        )
+        if not need_deep:
+            open_msg = f"；{open_info}" if open_info else ""
+            open_n_msg = (
+                f"；{'；'.join(open_notify_parts)}" if open_notify_parts else ""
+            )
+            print(f"快掃：{reason}，略過深度掃描{open_msg}{open_n_msg}")
+            return
+        print(f"快掃：{reason}，啟動深度掃描")
+
+    try:
+        df, avatar_urls, session = run_once(
+            cfg=cfg, session=session, all_courses=all_raw_courses
+        )
+    except (ConnectionError, Timeout, ChunkedEncodingError, requests.HTTPError, ValueError) as e:
+        print(f"掃描失敗，本次略過：{e}")
+        return
+
+    out = Path(__file__).resolve().parent / cfg["output_excel"]
+
+    history_cols = list(HISTORY_COLUMNS)
+    current_state = session_state_from_dataframe(df, avatar_urls)
+    current_state = filter_state_active_sessions(current_state, today)
+    skip_urls = _placeholder_session_urls(df)
+    placeholder_sessions = len(skip_urls)
 
     history_append_df: pd.DataFrame | None = None
     prev_baseline_avatar_map: dict[tuple[str, str], str] = {}
@@ -1976,8 +2283,10 @@ def main() -> None:
         except Exception as e:
             notify_parts.append(f"LINE 通知失敗：{e}")
 
-    notify_info = f"；{'；'.join(notify_parts)}" if notify_parts else ""
-    print(f"寫入: {path_msg}，目前筆數: {len(df)}；{info}{notify_info}")
+    all_notifies = notify_parts + open_notify_parts
+    notify_info = f"；{'；'.join(all_notifies)}" if all_notifies else ""
+    open_msg = f"；{open_info}" if open_info else ""
+    print(f"寫入: {path_msg}，目前筆數: {len(df)}；{info}{open_msg}{notify_info}")
 
 
 if __name__ == "__main__":

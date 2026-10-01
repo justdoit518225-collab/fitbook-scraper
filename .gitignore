@@ -4,7 +4,9 @@ __pycache__/
 _fitbook_*.html
 _probe_*.py
 last_scan_state.json
+open_sessions_state.json
 quick_scan_tick.json
+*.xlsx
 google_service_account.json
 *-service-account*.json
 .env

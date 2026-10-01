@@ -27,5 +27,8 @@
   "merge_session_cells": true,
   "quick_scan_enabled": true,
   "quick_scan_interval_minutes": 2,
-  "full_scan_every_quick_checks": 15
+  "full_scan_every_quick_checks": 15,
+  "scan_days_ahead": 60,
+  "open_session_notify_enabled": true,
+  "open_session_watch_keywords": []
 }

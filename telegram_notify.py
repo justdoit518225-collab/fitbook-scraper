@@ -465,3 +465,87 @@ def maybe_send_telegram_diff(
         return "已發送 Telegram 通知（含頭像拼圖）"
     send_telegram_message(token, chat_id, text, parse_mode="HTML")
     return "已發送 Telegram 通知"
+
+
+def format_new_sessions_message(
+    new_df: pd.DataFrame,
+    *,
+    sheet_url: str | None = None,
+    telegram_html: bool = False,
+    max_len: int | None = None,
+) -> str:
+    if new_df.empty:
+        return ""
+    lines: list[str] = []
+    n = len(new_df)
+
+    if telegram_html:
+        lines.append(f"🆕 <b>FitBook 新開場次通知</b>（共 {n} 場）")
+        lines.append(_escape_telegram_html(_LINE_SEP))
+        for _, row in new_df.iterrows():
+            cname = str(row.get("課程名稱") or "").strip()
+            vname = str(row.get("場館標籤") or "").strip()
+            date_val = str(row.get("場次日期") or "").strip()
+            dow = str(row.get("星期") or "").strip()
+            time_val = str(row.get("時段") or "").strip()
+            order_cnt = row.get("開放名額")
+            url = str(row.get("預約頁面") or "").strip()
+
+            lines.append(f"📌 <b>{_escape_telegram_html(cname or vname)}</b>")
+            if vname and vname != cname:
+                lines.append(f"🏟️ 場館：{_escape_telegram_html(vname)}")
+            lines.append(f"📅 日期：{_escape_telegram_html(date_val)} ({_escape_telegram_html(dow)}) {_escape_telegram_html(time_val)}")
+            if order_cnt not in (None, ""):
+                lines.append(f"👥 開放名額：<b>{order_cnt}</b> 人")
+            if url:
+                lines.append(f'🔗 <a href="{url}">點此預約</a>')
+            lines.append(_escape_telegram_html(_LINE_SEP))
+        if sheet_url:
+            lines.append(f'📊 <a href="{sheet_url}">查看開場紀錄試算表</a>')
+    else:
+        lines.append(f"🆕【FitBook 新開場次通知】（共 {n} 場）")
+        lines.append(_LINE_SEP)
+        for _, row in new_df.iterrows():
+            cname = str(row.get("課程名稱") or "").strip()
+            vname = str(row.get("場館標籤") or "").strip()
+            date_val = str(row.get("場次日期") or "").strip()
+            dow = str(row.get("星期") or "").strip()
+            time_val = str(row.get("時段") or "").strip()
+            order_cnt = row.get("開放名額")
+            url = str(row.get("預約頁面") or "").strip()
+
+            lines.append(f"📌 課程：{cname or vname}")
+            if vname and vname != cname:
+                lines.append(f"🏟️ 場館：{vname}")
+            lines.append(f"📅 日期：{date_val} ({dow}) {time_val}")
+            if order_cnt not in (None, ""):
+                lines.append(f"👥 開放名額：{order_cnt} 人")
+            if url:
+                lines.append(f"🔗 預約：{url}")
+            lines.append(_LINE_SEP)
+        if sheet_url:
+            lines.append(f"📊 開場紀錄：{sheet_url}")
+
+    text = "\n".join(lines)
+    limit = max_len if max_len is not None else MAX_MESSAGE_LEN
+    if len(text) > limit:
+        text = text[: limit - 20].rstrip() + "\n…（訊息過長已截斷）"
+    return text
+
+
+def maybe_send_telegram_new_sessions(
+    cfg: dict[str, Any],
+    new_df: pd.DataFrame | None,
+    *,
+    sheet_url: str | None = None,
+) -> str | None:
+    """有新開場次且已設定 Token/Chat ID 時推送；未設定則略過。"""
+    if new_df is None or new_df.empty:
+        return None
+    token, chat_id = effective_telegram_credentials(cfg)
+    if not token or not chat_id:
+        return None
+    text = format_new_sessions_message(new_df, sheet_url=sheet_url, telegram_html=True)
+    send_telegram_message(token, chat_id, text, parse_mode="HTML")
+    return f"已發送 Telegram 新開場次通知（{len(new_df)} 場）"
+

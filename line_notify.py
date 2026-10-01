@@ -123,3 +123,29 @@ def maybe_send_line_diff(
     else:
         send_line_message(token, user_id, text)
     return "已發送 LINE 通知"
+
+
+def maybe_send_line_new_sessions(
+    cfg: dict[str, Any],
+    new_df: pd.DataFrame | None,
+    *,
+    sheet_url: str | None = None,
+) -> str | None:
+    """有新開場次且已設定 Token（廣播或 User ID 推播）時發送；未設定則略過。"""
+    if not line_notify_enabled(cfg):
+        return None
+    if new_df is None or new_df.empty:
+        return None
+    token, user_id = effective_line_credentials(cfg)
+    use_broadcast = line_use_broadcast(cfg)
+    if not token or (not use_broadcast and not user_id):
+        return None
+    from telegram_notify import format_new_sessions_message
+
+    text = format_new_sessions_message(new_df, sheet_url=sheet_url, telegram_html=False)
+    if use_broadcast:
+        send_line_broadcast(token, text)
+    else:
+        send_line_message(token, user_id, text)
+    return f"已發送 LINE 新開場次通知（{len(new_df)} 場）"
+

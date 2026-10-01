@@ -28,6 +28,28 @@ _GSPREAD_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 HISTORY_SHEET_NAME = "掃描歷史"
 BASELINE_SHEET_NAME = "_scan_baseline"
+OPEN_SESSIONS_SHEET_NAME = "開場紀錄"
+OPEN_SESSIONS_BASELINE_SHEET_NAME = "_open_sessions_baseline"
+
+OPEN_SESSIONS_COLUMNS = [
+    "偵測時間",
+    "課程名稱",
+    "場館標籤",
+    "場次日期",
+    "星期",
+    "時段",
+    "開放名額",
+    "預約頁面",
+]
+
+OPEN_SESSIONS_BASELINE_COLUMNS = [
+    "預約頁面",
+    "課程名稱",
+    "場次日期",
+    "時段",
+    "首次發現時間",
+]
+
 BASELINE_COLUMNS = [
     "預約頁面",
     "會員暱稱",
@@ -844,6 +866,99 @@ def save_baseline_to_sheet(sh: Any, state: dict[str, dict[str, Any]]) -> None:
         value_input_option="USER_ENTERED",
     )
     _hide_worksheet(sh, ws)
+
+
+def load_open_sessions_baseline_from_sheet(sh: Any) -> set[str]:
+    """從 _open_sessions_baseline 分頁讀取已知場次的預約頁面 URL。"""
+    try:
+        ws = sh.worksheet(OPEN_SESSIONS_BASELINE_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        return set()
+    rows = _gspread_call_with_retry(lambda: ws.get_all_values())
+    if len(rows) < 2:
+        return set()
+    header = rows[0]
+    try:
+        url_idx = header.index("預約頁面")
+    except ValueError:
+        url_idx = 0
+    urls = set()
+    for r in rows[1:]:
+        if len(r) > url_idx:
+            u = r[url_idx].strip()
+            if u:
+                urls.add(u)
+    return urls
+
+
+def save_open_sessions_baseline_to_sheet(sh: Any, records: list[dict[str, Any]]) -> None:
+    """覆寫 _open_sessions_baseline 分頁並隱藏。"""
+    ws = _ensure_worksheet(
+        sh,
+        OPEN_SESSIONS_BASELINE_SHEET_NAME,
+        rows=max(1000, len(records) + 50),
+        cols=len(OPEN_SESSIONS_BASELINE_COLUMNS),
+    )
+    ws.clear()
+    rows = [list(OPEN_SESSIONS_BASELINE_COLUMNS)]
+    for rec in records:
+        rows.append([
+            _sanitize_cell_for_api(rec.get("預約頁面", "")),
+            _sanitize_cell_for_api(rec.get("課程名稱", "")),
+            _sanitize_cell_for_api(rec.get("場次日期", "")),
+            _sanitize_cell_for_api(rec.get("時段", "")),
+            _sanitize_cell_for_api(rec.get("首次發現時間", "")),
+        ])
+    end_c = len(OPEN_SESSIONS_BASELINE_COLUMNS)
+    end_r = len(rows)
+    ws.update(
+        f"A1:{_col_a1(end_c)}{end_r}",
+        rows,
+        value_input_option="USER_ENTERED",
+    )
+    _hide_worksheet(sh, ws)
+
+
+def append_open_sessions_to_sheet(sh: Any, new_sessions_df: pd.DataFrame) -> None:
+    """將新開場次插入至「開場紀錄」分頁的第 2 列（標題下方），新事件在最前。"""
+    if new_sessions_df is None or new_sessions_df.empty:
+        return
+    hw = _ensure_worksheet(sh, OPEN_SESSIONS_SHEET_NAME, rows=2000, cols=len(OPEN_SESSIONS_COLUMNS))
+    existing = hw.get_all_values()
+    if not existing or not any(str(c).strip() for c in existing[0]):
+        hw.update("A1", [OPEN_SESSIONS_COLUMNS], value_input_option="USER_ENTERED")
+        existing = [OPEN_SESSIONS_COLUMNS]
+
+    df_write = new_sessions_df.reindex(columns=OPEN_SESSIONS_COLUMNS)
+    plain = _df_to_plain_values(df_write)
+    data_rows = plain[1:] if len(plain) > 1 else []
+    if not data_rows:
+        return
+
+    n = len(data_rows)
+    hid = hw.id
+    sh.batch_update(
+        {
+            "requests": [
+                {
+                    "insertDimension": {
+                        "range": {
+                            "sheetId": hid,
+                            "dimension": "ROWS",
+                            "startIndex": 1,
+                            "endIndex": 1 + n,
+                        },
+                        "inheritFromBefore": False,
+                    }
+                }
+            ]
+        }
+    )
+    hw.update(
+        f"A2:{_col_a1(len(OPEN_SESSIONS_COLUMNS))}{1 + n}",
+        data_rows,
+        value_input_option="USER_ENTERED",
+    )
 
 
 def clear_history_sheet(sh: Any) -> None:
