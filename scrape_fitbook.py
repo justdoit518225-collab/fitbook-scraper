@@ -1525,6 +1525,19 @@ def run_once(
         elif rc_int > 0:
             name_note = "（請在 config.json 設定 cookie_header 或環境變數 FITBOOK_COOKIE）"
 
+        order_count = _coerce_nonneg_int(c.get("order_count"))
+        if members:
+            # 優先以成功解析出的實際預約名冊人數為準，避免 FitBook 列表 API 快取延遲造成人數不一致
+            booked_count = len(members)
+            remain_count = (
+                max(0, order_count - booked_count)
+                if order_count is not None
+                else _coerce_nonneg_int(c.get("remain_count"))
+            )
+        else:
+            booked_count = int(rc_int)
+            remain_count = _coerce_nonneg_int(c.get("remain_count"))
+
         base_row = {
             "掃描時間": scan_at,
             "課程名稱": course_name_without_venue(name, venue_label),
@@ -1537,9 +1550,9 @@ def run_once(
             "時段": _as_text_cell(c.get("show_time")) or _as_text_cell(
                 c.get("time")
             ),
-            "已報名人數": int(rc_int),
-            "開放名額": _coerce_nonneg_int(c.get("order_count")),
-            "剩餘名額": _coerce_nonneg_int(c.get("remain_count")),
+            "已報名人數": booked_count,
+            "開放名額": order_count,
+            "剩餘名額": remain_count,
             "預約頁面": (c.get("url") or "").strip(),
         }
 
