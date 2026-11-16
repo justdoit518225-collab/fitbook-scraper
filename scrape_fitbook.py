@@ -391,9 +391,7 @@ def parse_members_with_avatars_from_html(
 
     fb = _parse_fitbook_yiyu_huiyuan(soup)
     if fb:
-        if teacher_name:
-            tn = teacher_name.strip()
-            fb = [(n, u) for n, u in fb if n != tn]
+        # 「已預約會員」區塊內的人員皆為實際報名佔名額的會員（包含開課人或球友自己報名），不應過濾 teacher_name
         return fb
 
     names: list[str] = []
